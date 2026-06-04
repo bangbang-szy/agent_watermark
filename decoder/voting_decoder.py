@@ -37,7 +37,22 @@ class MultiStatisticVotingDecoder:
             signs[name] = 1 if value >= 0.5 else -1
         return signs
 
-    def _phi_alignment(self, path: str | Path, identity: WatermarkIdentity) -> float:
+    def _feature_vote(self, path: str | Path, identity: WatermarkIdentity) -> float:
+        """Weak auxiliary vote from aggregate trajectory statistics.
+
+        This vote is intentionally low-weight because one short run can be too
+        sparse for stable behavioral frequencies.
+        """
+        observed = self._observed_direction(path)
+        expected = self.signature.feature_signature(identity)
+        return float(np.mean([1.0 if observed[k] == expected[k] else 0.0 for k in FEATURE_NAMES]))
+
+    def _legacy_phi_alignment(self, path: str | Path, identity: WatermarkIdentity) -> float:
+        """Compatibility score for logs that include watermark_phi.
+
+        Newer scoring does not require watermark_phi because that field is a
+        diagnostic, not a necessary decoding secret.
+        """
         steps = JsonlExecutionLogger.read(path)
         margins: List[float] = []
         for step in steps:
@@ -46,16 +61,50 @@ class MultiStatisticVotingDecoder:
                     margins.append(candidate.watermark_phi * self.signature.tool_phi(identity, candidate.name))
         return float(np.mean(margins)) if margins else 0.0
 
+    def _action_delta_alignment(self, path: str | Path, identity: WatermarkIdentity) -> float:
+        """Recover the watermark by comparing relative log-probability shifts.
+
+        For each action-selection step the embedder applies:
+
+            log p'(a) = log p(a) + lambda * phi(a) - log Z
+
+        The unknown normalizer log Z is constant within the candidate set, so
+        centering the observed deltas removes it. This makes the decoder depend
+        only on execution logs: raw probabilities, watermarked probabilities,
+        and candidate action names.
+        """
+        steps = JsonlExecutionLogger.read(path)
+        similarities: List[float] = []
+        for step in steps:
+            if len(step.candidate_actions) < 2:
+                continue
+            observed = []
+            expected = []
+            for candidate in step.candidate_actions:
+                raw = max(candidate.raw_probability, 1e-12)
+                watermarked = max(candidate.watermarked_probability, 1e-12)
+                observed.append(np.log(watermarked) - np.log(raw))
+                expected.append(self.signature.tool_phi(identity, candidate.name))
+            obs = np.asarray(observed, dtype=float)
+            exp = np.asarray(expected, dtype=float)
+            obs = obs - obs.mean()
+            exp = exp - exp.mean()
+            denom = float(np.linalg.norm(obs) * np.linalg.norm(exp))
+            if denom > 1e-12:
+                similarities.append(float(np.dot(obs, exp) / denom))
+        if not similarities:
+            return 0.0
+        return float((np.mean(similarities) + 1.0) / 2.0)
+
     def decode(self, path: str | Path) -> DecodeResult:
-        observed = self._observed_direction(path)
         rows = []
         for author in self.candidate_authors:
             for ts in self.candidate_timestamps:
                 identity = WatermarkIdentity(author, ts)
-                expected = self.signature.feature_signature(identity)
-                feature_vote = np.mean([1.0 if observed[k] == expected[k] else 0.0 for k in FEATURE_NAMES])
-                phi_vote = (self._phi_alignment(path, identity) + 1.0) / 2.0
-                score = 0.65 * feature_vote + 0.35 * phi_vote
+                feature_vote = self._feature_vote(path, identity)
+                action_vote = self._action_delta_alignment(path, identity)
+                legacy_vote = (self._legacy_phi_alignment(path, identity) + 1.0) / 2.0
+                score = 0.80 * action_vote + 0.15 * feature_vote + 0.05 * legacy_vote
                 rows.append({"author_id": author, "timestamp": ts, "score": float(score)})
         ranked = pd.DataFrame(rows).sort_values("score", ascending=False)
         top = ranked.iloc[0]
