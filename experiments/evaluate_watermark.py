@@ -25,7 +25,12 @@ from agent_watermark.watermark.signature import WatermarkIdentity
 
 
 def load_config(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
+    config_path = Path(path)
+    if not config_path.exists() and not config_path.is_absolute():
+        repo_relative = Path(__file__).parents[1] / config_path
+        if repo_relative.exists():
+            config_path = repo_relative
+    with config_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
