@@ -144,6 +144,37 @@ Implemented attacks:
 
 Results are written to `runtime/attacks/robustness_results.json`.
 
+## Presentation Evaluation Plots
+
+Run a compact multi-task evaluation and generate PNG figures for slides or a standup:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --config configs/deepseek.yaml \
+  --watermarked-author alice-lab \
+  --authors alice-lab bob-lab carol-lab \
+  --tasks 6 \
+  --repeats 1 \
+  --out runtime/evaluation
+```
+
+Use existing logs without calling the LLM:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --logs runtime/logs/*.jsonl \
+  --authors alice-lab bob-lab carol-lab \
+  --out runtime/evaluation
+```
+
+Outputs:
+
+- `runtime/evaluation/plots/watermark_evaluation_overview.png`
+- `runtime/evaluation/plots/behavior_statistics_boxplot.png`
+- `runtime/evaluation/plots/vote_score_heatmap.png`
+- `runtime/evaluation/plots/robustness_confidence_curve.png`
+- CSV tables for clean decoding, attack decoding, behavior features, tool actions, and vote scores
+
 ## Platform Migration
 
 LangGraph:
