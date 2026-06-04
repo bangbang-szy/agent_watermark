@@ -28,15 +28,23 @@ def main() -> None:
     parser.add_argument("--all", action="store_true")
     args = parser.parse_args()
     load_dotenv()
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("Set OPENAI_API_KEY before running the real agent.")
     cfg = load_config(args.config)
+    api_key_env = cfg.get("llm_api_key_env", "OPENAI_API_KEY")
+    if not os.getenv(api_key_env):
+        raise RuntimeError(f"Set {api_key_env} before running the real agent.")
     init_demo_database(cfg["sqlite_path"])
     Path(cfg["workspace_dir"]).mkdir(parents=True, exist_ok=True)
     logger = JsonlExecutionLogger(cfg["log_dir"])
     identity = WatermarkIdentity.create(args.author_id)
     tools = build_tools(cfg["sqlite_path"], cfg["workspace_dir"])
-    agent_cfg = AgentConfig(cfg["openai_model"], cfg["temperature"], cfg["max_steps"], cfg["watermark_lambda"])
+    agent_cfg = AgentConfig(
+        model=cfg["openai_model"],
+        temperature=cfg["temperature"],
+        max_steps=cfg["max_steps"],
+        watermark_lambda=cfg["watermark_lambda"],
+        api_key_env=api_key_env,
+        base_url=cfg.get("llm_base_url"),
+    )
     tasks = all_tasks() if args.all else [args.task or all_tasks()[0]]
     for task in tasks:
         agent = WatermarkedLangGraphAgent(tools, logger, identity, agent_cfg)

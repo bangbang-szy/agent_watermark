@@ -41,12 +41,20 @@ cfg = yaml.safe_load(open(Path(__file__).parents[1] / "configs/default.yaml", "r
 
 @app.post("/run")
 def run_agent(req: RunRequest):
-    if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError("OPENAI_API_KEY is required.")
+    api_key_env = cfg.get("llm_api_key_env", "OPENAI_API_KEY")
+    if not os.getenv(api_key_env):
+        raise RuntimeError(f"{api_key_env} is required.")
     init_demo_database(cfg["sqlite_path"])
     tools = build_tools(cfg["sqlite_path"], cfg["workspace_dir"])
     identity = WatermarkIdentity.create(req.author_id)
-    agent_cfg = AgentConfig(cfg["openai_model"], cfg["temperature"], cfg["max_steps"], cfg["watermark_lambda"])
+    agent_cfg = AgentConfig(
+        model=cfg["openai_model"],
+        temperature=cfg["temperature"],
+        max_steps=cfg["max_steps"],
+        watermark_lambda=cfg["watermark_lambda"],
+        api_key_env=api_key_env,
+        base_url=cfg.get("llm_base_url"),
+    )
     agent = WatermarkedLangGraphAgent(tools, JsonlExecutionLogger(cfg["log_dir"]), identity, agent_cfg)
     result = agent.run(req.task)
     return {"run_id": result["run_id"], "log_path": str(Path(cfg["log_dir"]) / f"{result['run_id']}.jsonl"), "timestamp": identity.timestamp, "answer": result["answer"]}

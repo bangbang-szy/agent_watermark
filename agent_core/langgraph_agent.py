@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, TypedDict
@@ -29,6 +30,8 @@ class AgentConfig:
     temperature: float
     max_steps: int
     watermark_lambda: float
+    api_key_env: str = "OPENAI_API_KEY"
+    base_url: str | None = None
 
 
 class WatermarkedLangGraphAgent:
@@ -45,7 +48,17 @@ class WatermarkedLangGraphAgent:
         self.logger = logger
         self.identity = identity
         self.config = config
-        self.llm = ChatOpenAI(model=config.model, temperature=config.temperature)
+        api_key = os.getenv(config.api_key_env)
+        if not api_key:
+            raise RuntimeError(f"Set {config.api_key_env} before running the real agent.")
+        llm_kwargs: Dict[str, Any] = {
+            "model": config.model,
+            "temperature": config.temperature,
+            "api_key": api_key,
+        }
+        if config.base_url:
+            llm_kwargs["base_url"] = config.base_url
+        self.llm = ChatOpenAI(**llm_kwargs)
         self.embedder = MultiStatisticWatermarkEmbedder(identity, config.watermark_lambda)
         self.run_id = str(uuid.uuid4())
         self.graph = self._build_graph()

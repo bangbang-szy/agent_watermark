@@ -51,7 +51,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-Set your API key:
+Set your API key. Do not commit real keys.
 
 ```bash
 set OPENAI_API_KEY=sk-...
@@ -69,12 +69,25 @@ You can also create `.env`:
 OPENAI_API_KEY=sk-...
 ```
 
-Default model is in `configs/default.yaml` (`gpt-4.1`). Change it to `gpt-4o` if needed.
+DeepSeek is supported through the OpenAI-compatible API:
+
+```powershell
+$env:DEEPSEEK_API_KEY="sk-..."
+python -m agent_watermark.experiments.run_agent --config configs/deepseek.yaml --author-id alice-lab --task "Compare average success_rate by framework in the agents table."
+```
+
+Default OpenAI model is in `configs/default.yaml` (`gpt-4.1`). DeepSeek defaults are in `configs/deepseek.yaml` (`deepseek-chat`, `https://api.deepseek.com`).
 
 ## Run A Real Watermarked Agent
 
 ```bash
 python -m agent_watermark.experiments.run_agent --author-id alice-lab --task "Query the local database for the paper with the most citations and report its title and year."
+```
+
+DeepSeek:
+
+```bash
+python -m agent_watermark.experiments.run_agent --config configs/deepseek.yaml --author-id alice-lab --task "Query the local database for the paper with the most citations and report its title and year."
 ```
 
 Run the task suite:
@@ -136,13 +149,13 @@ Results are written to `runtime/attacks/robustness_results.json`.
 LangGraph:
 
 ```bash
-python -m agent_watermark.experiments.platform_migration --framework langgraph --author-id alice-lab
+python -m agent_watermark.experiments.platform_migration --config configs/deepseek.yaml --framework langgraph --author-id alice-lab
 ```
 
 LangChain-style loop:
 
 ```bash
-python -m agent_watermark.experiments.platform_migration --framework langchain --author-id alice-lab
+python -m agent_watermark.experiments.platform_migration --config configs/deepseek.yaml --framework langchain --author-id alice-lab
 ```
 
 Both use the same LangChain tools and watermark middleware, which is the intended migration boundary.

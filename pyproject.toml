@@ -8,6 +8,17 @@ version = "0.1.0"
 description = "Behavior watermarking for real tool-using agents."
 requires-python = ">=3.10"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["agent_watermark*"]
+[tool.setuptools]
+package-dir = {"agent_watermark" = "."}
+packages = [
+  "agent_watermark",
+  "agent_watermark.agent_core",
+  "agent_watermark.api",
+  "agent_watermark.decoder",
+  "agent_watermark.experiments",
+  "agent_watermark.feature_analysis",
+  "agent_watermark.logging",
+  "agent_watermark.tests",
+  "agent_watermark.visualization",
+  "agent_watermark.watermark",
+]

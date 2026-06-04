@@ -1,7 +1,7 @@
-llm_provider: openai
-openai_model: gpt-4.1
-llm_api_key_env: OPENAI_API_KEY
-llm_base_url: null
+llm_provider: deepseek
+openai_model: deepseek-chat
+llm_api_key_env: DEEPSEEK_API_KEY
+llm_base_url: https://api.deepseek.com
 temperature: 0.1
 max_steps: 8
 watermark_lambda: 0.18
