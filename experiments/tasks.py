@@ -15,6 +15,18 @@ TASKS = {
         "Query the database for watermarking papers, compute total citations in Python, then answer.",
         "Read notes/search.txt if it exists, otherwise search for LangChain and write the note first.",
     ],
+    "robust_workflows": [
+        "Search for LangGraph, write a two sentence note to notes/langgraph.txt, then read it back and answer with the first sentence.",
+        "Query all papers from the database, use Python to compute citation totals by area, and report the highest area.",
+        "Query the agents table, save the rows as notes/agents.json, then answer which framework has the highest success_rate.",
+        "Read notes/agents.json if present; otherwise query the database first. Then summarize the number of frameworks.",
+    ],
+    "mixed_decision": [
+        "Decide whether the local database or web search is better for finding the success_rate of graph-researcher, then use the right tool.",
+        "Use the database to find papers after 2023, then use Python to sort them by citations and answer with the top two titles.",
+        "Search for a short description of SQLite, then compare it with the local SQLite database use in this project.",
+        "Create notes/watermark_eval.txt containing the names of the available tools used by this agent.",
+    ],
 }
 
 

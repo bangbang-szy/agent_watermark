@@ -103,8 +103,7 @@ class MultiStatisticVotingDecoder:
                 identity = WatermarkIdentity(author, ts)
                 feature_vote = self._feature_vote(path, identity)
                 action_vote = self._action_delta_alignment(path, identity)
-                legacy_vote = (self._legacy_phi_alignment(path, identity) + 1.0) / 2.0
-                score = 0.80 * action_vote + 0.15 * feature_vote + 0.05 * legacy_vote
+                score = 0.85 * action_vote + 0.15 * feature_vote
                 rows.append({"author_id": author, "timestamp": ts, "score": float(score)})
         ranked = pd.DataFrame(rows).sort_values("score", ascending=False)
         top = ranked.iloc[0]

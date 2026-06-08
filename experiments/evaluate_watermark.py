@@ -17,8 +17,15 @@ from agent_watermark.agent_core.database import init_demo_database
 from agent_watermark.agent_core.langgraph_agent import AgentConfig, WatermarkedLangGraphAgent
 from agent_watermark.agent_core.tools import build_tools
 from agent_watermark.decoder.voting_decoder import MultiStatisticVotingDecoder
-from agent_watermark.experiments.robustness import crop_log, lightweight_finetune_attack, rewrite_output
-from agent_watermark.experiments.tasks import TASKS, all_tasks
+from agent_watermark.experiments.robustness import (
+    crop_log,
+    lightweight_finetune_attack,
+    probability_noise_attack,
+    reorder_log_attack,
+    rewrite_output,
+    tool_call_deletion_attack,
+)
+from agent_watermark.experiments.tasks import all_tasks
 from agent_watermark.feature_analysis.extractor import BehaviorFeatureExtractor
 from agent_watermark.logging.jsonl_logger import JsonlExecutionLogger
 from agent_watermark.watermark.signature import WatermarkIdentity
@@ -34,14 +41,14 @@ def load_config(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def build_agent(cfg: dict, author_id: str) -> tuple[WatermarkedLangGraphAgent, WatermarkIdentity]:
+def build_agent(cfg: dict, author_id: str, watermark_lambda: float | None = None) -> tuple[WatermarkedLangGraphAgent, WatermarkIdentity]:
     identity = WatermarkIdentity.create(author_id)
     tools = build_tools(cfg["sqlite_path"], cfg["workspace_dir"])
     agent_cfg = AgentConfig(
         model=cfg["openai_model"],
         temperature=cfg["temperature"],
         max_steps=cfg["max_steps"],
-        watermark_lambda=cfg["watermark_lambda"],
+        watermark_lambda=cfg["watermark_lambda"] if watermark_lambda is None else watermark_lambda,
         api_key_env=cfg.get("llm_api_key_env", "OPENAI_API_KEY"),
         base_url=cfg.get("llm_base_url"),
     )
@@ -53,28 +60,41 @@ def select_tasks(limit: int | None) -> List[str]:
     return tasks if limit is None else tasks[:limit]
 
 
-def run_logs(cfg: dict, authors: List[str], tasks: List[str], repeats: int) -> pd.DataFrame:
+def task_success(log_path: str, answer: str | None) -> bool:
+    """Heuristic task-success indicator for batch research runs."""
+    if not answer or not str(answer).strip():
+        return False
+    steps = JsonlExecutionLogger.read(log_path)
+    for step in steps:
+        if step.tool_call and step.tool_call.error:
+            return False
+    return True
+
+
+def run_logs(cfg: dict, authors: List[str], tasks: List[str], repeats: int, lambda_values: List[float]) -> pd.DataFrame:
     rows = []
     init_demo_database(cfg["sqlite_path"])
     Path(cfg["workspace_dir"]).mkdir(parents=True, exist_ok=True)
-    for author_id in authors:
-        for repeat in range(repeats):
-            for task in tasks:
-                agent, identity = build_agent(cfg, author_id)
-                result = agent.run(task)
-                log_path = str(Path(cfg["log_dir"]) / f"{result['run_id']}.jsonl")
-                rows.append(
-                    {
+    for watermark_lambda in lambda_values:
+        for author_id in authors:
+            for repeat in range(repeats):
+                for task in tasks:
+                    agent, identity = build_agent(cfg, author_id, watermark_lambda)
+                    result = agent.run(task)
+                    log_path = str(Path(cfg["log_dir"]) / f"{result['run_id']}.jsonl")
+                    row = {
                         "run_id": result["run_id"],
                         "author_id": author_id,
                         "timestamp": identity.timestamp,
                         "task": task,
                         "repeat": repeat,
+                        "watermark_lambda": watermark_lambda,
                         "log_path": log_path,
                         "answer": result.get("answer"),
                     }
-                )
-                print(json.dumps(rows[-1], ensure_ascii=False))
+                    row["task_success"] = task_success(log_path, row["answer"])
+                    rows.append(row)
+                    print(json.dumps(rows[-1], ensure_ascii=False))
     return pd.DataFrame(rows)
 
 
@@ -92,8 +112,10 @@ def existing_manifest(logs: Iterable[str]) -> pd.DataFrame:
                 "timestamp": first.watermark_timestamp,
                 "task": first.task,
                 "repeat": 0,
+                "watermark_lambda": float("nan"),
                 "log_path": str(path),
                 "answer": steps[-1].final_answer,
+                "task_success": task_success(str(path), steps[-1].final_answer),
             }
         )
     return pd.DataFrame(rows)
@@ -139,6 +161,16 @@ def decode_attacks(manifest: pd.DataFrame, candidate_authors: List[str], out_dir
         tuned = attack_dir / f"{item.run_id}_preference_drift.jsonl"
         lightweight_finetune_attack(Path(item.log_path), tuned, preferred_tool="search")
         attack_specs.append(("preference_drift", 0.0, tuned))
+        reordered = attack_dir / f"{item.run_id}_reordered.jsonl"
+        reorder_log_attack(Path(item.log_path), reordered)
+        attack_specs.append(("log_reorder", 0.0, reordered))
+        for sigma in [0.01, 0.03, 0.05]:
+            noisy = attack_dir / f"{item.run_id}_prob_noise_{int(sigma * 100)}.jsonl"
+            probability_noise_attack(Path(item.log_path), noisy, sigma=sigma)
+            attack_specs.append(("probability_noise", sigma, noisy))
+        deleted = attack_dir / f"{item.run_id}_tool_call_delete.jsonl"
+        tool_call_deletion_attack(Path(item.log_path), deleted, ratio=0.3)
+        attack_specs.append(("tool_call_deletion", 0.3, deleted))
         for attack, severity, path in attack_specs:
             decoded = decoder.decode(path)
             rows.append(
@@ -147,6 +179,7 @@ def decode_attacks(manifest: pd.DataFrame, candidate_authors: List[str], out_dir
                     "attack": attack,
                     "severity": severity,
                     "true_author": item.author_id,
+                    "watermark_lambda": getattr(item, "watermark_lambda", float("nan")),
                     "decoded_author": decoded.author_id,
                     "confidence": decoded.confidence,
                     "correct_author": decoded.author_id == item.author_id,
@@ -214,6 +247,7 @@ def plot_metrics(
         "clean_author_accuracy": float(clean_results["correct_author"].mean()),
         "clean_timestamp_accuracy": float(clean_results["correct_timestamp"].mean()),
         "clean_mean_confidence": float(clean_results["confidence"].mean()),
+        "task_success_rate": float(manifest["task_success"].mean()) if "task_success" in manifest else None,
         "num_runs": int(len(manifest)),
         "num_steps": int(len(step_df)),
     }
@@ -294,6 +328,36 @@ def plot_metrics(
     fig.savefig(plot_dir / "robustness_confidence_curve.png", dpi=180)
     plt.close(fig)
 
+    if "watermark_lambda" in manifest and manifest["watermark_lambda"].notna().any():
+        lambda_manifest = manifest.groupby("watermark_lambda", as_index=False).agg(task_success=("task_success", "mean"))
+        lambda_clean = clean_results.merge(manifest[["run_id", "watermark_lambda"]], on="run_id", how="left")
+        lambda_clean = lambda_clean.groupby("watermark_lambda", as_index=False).agg(
+            clean_accuracy=("correct_author", "mean"),
+            clean_confidence=("confidence", "mean"),
+        )
+        lambda_attack = attack_results.groupby("watermark_lambda", as_index=False).agg(
+            attack_accuracy=("correct_author", "mean"),
+            attack_confidence=("confidence", "mean"),
+        )
+        tradeoff = lambda_manifest.merge(lambda_clean, on="watermark_lambda", how="outer").merge(
+            lambda_attack, on="watermark_lambda", how="outer"
+        )
+        tradeoff.to_csv(out_dir / "lambda_tradeoff.csv", index=False)
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.plot(tradeoff["watermark_lambda"], tradeoff["task_success"], marker="o", label="task success")
+        ax.plot(tradeoff["watermark_lambda"], tradeoff["clean_accuracy"], marker="o", label="clean decode accuracy")
+        ax.plot(tradeoff["watermark_lambda"], tradeoff["clean_confidence"], marker="o", label="clean confidence")
+        ax.plot(tradeoff["watermark_lambda"], tradeoff["attack_accuracy"], marker="o", label="attack decode accuracy")
+        ax.set_title("Watermark strength trade-off")
+        ax.set_xlabel("lambda")
+        ax.set_ylabel("score")
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(plot_dir / "lambda_tradeoff_curve.png", dpi=180)
+        plt.close(fig)
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run multi-task watermark evaluation and generate presentation plots.")
@@ -302,6 +366,7 @@ def main() -> None:
     parser.add_argument("--watermarked-author", default="alice-lab")
     parser.add_argument("--tasks", type=int, default=6, help="Number of built-in tasks to run. Use 0 for all tasks.")
     parser.add_argument("--repeats", type=int, default=1)
+    parser.add_argument("--lambda-values", nargs="+", type=float, default=None)
     parser.add_argument("--logs", nargs="*", help="Use existing JSONL logs instead of running the agent.")
     parser.add_argument("--out", default="runtime/evaluation")
     parser.add_argument("--seed", type=int, default=7)
@@ -322,7 +387,8 @@ def main() -> None:
         if not os.getenv(api_key_env):
             raise RuntimeError(f"Set {api_key_env} before running evaluation.")
         task_limit = None if args.tasks == 0 else args.tasks
-        manifest = run_logs(cfg, [args.watermarked_author], select_tasks(task_limit), args.repeats)
+        lambda_values = args.lambda_values or [float(cfg["watermark_lambda"])]
+        manifest = run_logs(cfg, [args.watermarked_author], select_tasks(task_limit), args.repeats, lambda_values)
 
     if manifest.empty:
         raise RuntimeError("No logs available for evaluation.")

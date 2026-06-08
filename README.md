@@ -158,6 +158,31 @@ python -m agent_watermark.experiments.evaluate_watermark \
   --out runtime/evaluation
 ```
 
+Run all built-in tasks:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --config configs/deepseek.yaml \
+  --watermarked-author alice-lab \
+  --authors alice-lab bob-lab carol-lab \
+  --tasks 0 \
+  --repeats 1 \
+  --out runtime/evaluation_all_tasks
+```
+
+Sweep watermark strength to measure task-success / watermark-recovery trade-off:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --config configs/deepseek.yaml \
+  --watermarked-author alice-lab \
+  --authors alice-lab bob-lab carol-lab \
+  --tasks 6 \
+  --repeats 1 \
+  --lambda-values 0.00 0.06 0.12 0.18 0.24 0.30 \
+  --out runtime/evaluation_lambda_sweep
+```
+
 Use existing logs without calling the LLM:
 
 ```bash
@@ -173,7 +198,19 @@ Outputs:
 - `runtime/evaluation/plots/behavior_statistics_boxplot.png`
 - `runtime/evaluation/plots/vote_score_heatmap.png`
 - `runtime/evaluation/plots/robustness_confidence_curve.png`
+- `runtime/evaluation/plots/lambda_tradeoff_curve.png` when `--lambda-values` is used
 - CSV tables for clean decoding, attack decoding, behavior features, tool actions, and vote scores
+
+The evaluation script includes clean decoding plus robustness attacks:
+
+- 10%, 20%, 30% log cropping
+- final-output rewrite
+- lightweight tool-preference drift
+- local log reordering
+- candidate probability noise
+- tool-call observation deletion
+
+It also records a heuristic `task_success` signal, defined as a non-empty final answer with no tool-call errors in the execution log.
 
 ## Platform Migration
 
