@@ -19,15 +19,16 @@ def softmax(logits: Iterable[float]) -> np.ndarray:
 class MultiStatisticWatermarkEmbedder:
     """Action-selection middleware implementing p'(a)=softmax(log p(a)+lambda*phi(a))."""
 
-    def __init__(self, identity: WatermarkIdentity, strength: float = 0.18):
+    def __init__(self, identity: WatermarkIdentity, strength: float = 0.18, timestamp_granularity: str = "exact"):
         self.identity = identity
         self.strength = strength
+        self.timestamp_granularity = timestamp_granularity
         self.signature = SignatureGenerator()
 
     def reweight(self, raw_logits: Dict[str, float], descriptions: Dict[str, str]) -> List[CandidateAction]:
         names = list(raw_logits.keys())
         raw_probs = softmax(raw_logits[name] for name in names)
-        phi = np.asarray([self.signature.tool_phi(self.identity, name) for name in names])
+        phi = np.asarray([self.signature.tool_phi(self.identity, name, self.timestamp_granularity) for name in names])
         watermarked_logits = np.log(np.clip(raw_probs, 1e-9, 1.0)) + self.strength * phi
         watermarked_probs = softmax(watermarked_logits)
         return [

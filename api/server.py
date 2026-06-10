@@ -28,6 +28,9 @@ class DecodeRequest(BaseModel):
     log_path: str
     authors: List[str]
     timestamps: List[str]
+    timestamp_granularity: str = "exact"
+    min_margin: float = 0.08
+    min_confidence: float = 0.55
 
 
 class AnalyzeRequest(BaseModel):
@@ -54,6 +57,7 @@ def run_agent(req: RunRequest):
         watermark_lambda=cfg["watermark_lambda"],
         api_key_env=api_key_env,
         base_url=cfg.get("llm_base_url"),
+        timestamp_granularity=cfg.get("watermark_timestamp_granularity", "exact"),
     )
     agent = WatermarkedLangGraphAgent(tools, JsonlExecutionLogger(cfg["log_dir"]), identity, agent_cfg)
     result = agent.run(req.task)
@@ -62,7 +66,13 @@ def run_agent(req: RunRequest):
 
 @app.post("/decode")
 def decode(req: DecodeRequest):
-    return MultiStatisticVotingDecoder(req.authors, req.timestamps).decode(req.log_path).__dict__
+    return MultiStatisticVotingDecoder(
+        req.authors,
+        req.timestamps,
+        timestamp_granularity=req.timestamp_granularity,
+        min_margin=req.min_margin,
+        min_confidence=req.min_confidence,
+    ).decode(req.log_path).__dict__
 
 
 @app.post("/analyze")

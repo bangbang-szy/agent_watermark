@@ -5,6 +5,7 @@ llm_base_url: null
 temperature: 0.1
 max_steps: 8
 watermark_lambda: 0.18
+watermark_timestamp_granularity: exact
 workspace_dir: runtime/files
 sqlite_path: runtime/agent.db
 log_dir: runtime/logs

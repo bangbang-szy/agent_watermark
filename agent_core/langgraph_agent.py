@@ -32,6 +32,7 @@ class AgentConfig:
     watermark_lambda: float
     api_key_env: str = "OPENAI_API_KEY"
     base_url: str | None = None
+    timestamp_granularity: str = "exact"
 
 
 class WatermarkedLangGraphAgent:
@@ -59,7 +60,11 @@ class WatermarkedLangGraphAgent:
         if config.base_url:
             llm_kwargs["base_url"] = config.base_url
         self.llm = ChatOpenAI(**llm_kwargs)
-        self.embedder = MultiStatisticWatermarkEmbedder(identity, config.watermark_lambda)
+        self.embedder = MultiStatisticWatermarkEmbedder(
+            identity,
+            config.watermark_lambda,
+            timestamp_granularity=config.timestamp_granularity,
+        )
         self.run_id = str(uuid.uuid4())
         self.graph = self._build_graph()
 
@@ -107,11 +112,26 @@ class WatermarkedLangGraphAgent:
         if text.startswith("```"):
             text = text.strip("`")
             text = text.replace("json\n", "", 1)
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            start = text.find("{")
+            end = text.rfind("}")
+            if start >= 0 and end > start:
+                return json.loads(text[start : end + 1])
+            raise
 
     def _planner(self, state: AgentState) -> AgentState:
-        response = self.llm.invoke(self._planner_prompt(state))
-        parsed = self._parse_json(str(response.content))
+        try:
+            response = self.llm.invoke(self._planner_prompt(state))
+            parsed = self._parse_json(str(response.content))
+        except Exception as exc:
+            parsed = {
+                "reasoning": f"planner_error: {exc!r}",
+                "candidate_logits": {"final_answer": 1.0},
+                "arguments": {},
+                "final_answer": f"Unable to complete planning due to planner error: {exc!r}",
+            }
         descriptions = self._candidate_descriptions()
         raw_logits = {name: float(parsed.get("candidate_logits", {}).get(name, -5.0)) for name in descriptions}
         candidates = self.embedder.reweight(raw_logits, descriptions)

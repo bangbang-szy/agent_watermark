@@ -38,6 +38,7 @@ def main() -> None:
         watermark_lambda=cfg["watermark_lambda"],
         api_key_env=api_key_env,
         base_url=cfg.get("llm_base_url"),
+        timestamp_granularity=cfg.get("watermark_timestamp_granularity", "exact"),
     )
     cls = WatermarkedLangGraphAgent if args.framework == "langgraph" else WatermarkedLangChainAgent
     agent = cls(tools, logger, identity, agent_cfg)

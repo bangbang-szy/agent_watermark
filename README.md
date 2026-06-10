@@ -180,6 +180,9 @@ python -m agent_watermark.experiments.evaluate_watermark \
   --tasks 6 \
   --repeats 1 \
   --lambda-values 0.00 0.06 0.12 0.18 0.24 0.30 \
+  --timestamp-granularity hour \
+  --min-margin 0.08 \
+  --min-confidence 0.55 \
   --out runtime/evaluation_lambda_sweep
 ```
 
@@ -199,7 +202,13 @@ Outputs:
 - `runtime/evaluation/plots/vote_score_heatmap.png`
 - `runtime/evaluation/plots/robustness_confidence_curve.png`
 - `runtime/evaluation/plots/lambda_tradeoff_curve.png` when `--lambda-values` is used
+- `runtime/evaluation/plots/coverage_accuracy_calibration.png`
+- `runtime/evaluation/plots/decoder_ablation.png`
 - CSV tables for clean decoding, attack decoding, behavior features, tool actions, and vote scores
+- `aggregate_decoding_results.csv` for multi-run grouped decoding
+- `calibration_curve.csv` for abstention threshold analysis
+- `statistical_summary.csv` with mean, standard error, and 95% CI
+- `decoder_ablation.csv` and `decoder_ablation_summary.csv` comparing full, action-only, and feature-only decoders
 
 The evaluation script includes clean decoding plus robustness attacks:
 
@@ -211,6 +220,17 @@ The evaluation script includes clean decoding plus robustness attacks:
 - tool-call observation deletion
 
 It also records a heuristic `task_success` signal, defined as a non-empty final answer with no tool-call errors in the execution log.
+
+For short trajectories, exact microsecond timestamp recovery is too high-capacity. Use `--timestamp-granularity hour`
+or the DeepSeek config default `watermark_timestamp_granularity: hour` to encode a recoverable timestamp bucket.
+The decoder reports both exact timestamp and timestamp-bucket accuracy.
+
+The decoder also reports:
+
+- `margin`: top candidate score minus runner-up score
+- `calibrated_confidence`: sigmoid calibration of the margin
+- `abstained`: whether evidence is too weak under `--min-margin` / `--min-confidence`
+- `correct_author_when_not_abstained`: selective accuracy after refusing weak evidence
 
 ## Platform Migration
 

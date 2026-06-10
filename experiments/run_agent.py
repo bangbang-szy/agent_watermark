@@ -44,6 +44,7 @@ def main() -> None:
         watermark_lambda=cfg["watermark_lambda"],
         api_key_env=api_key_env,
         base_url=cfg.get("llm_base_url"),
+        timestamp_granularity=cfg.get("watermark_timestamp_granularity", "exact"),
     )
     tasks = all_tasks() if args.all else [args.task or all_tasks()[0]]
     for task in tasks:

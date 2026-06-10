@@ -22,8 +22,11 @@ class DuckDuckGoSearchTool(BaseTool):
     args_schema: type[BaseModel] = SearchInput
 
     def _run(self, query: str, max_results: int = 5) -> str:
-        with DDGS() as ddgs:
-            rows = list(ddgs.text(query, max_results=max_results))
+        try:
+            with DDGS() as ddgs:
+                rows = list(ddgs.text(query, max_results=max_results))
+        except Exception as exc:
+            return json.dumps({"status": "search_error", "error": repr(exc), "query": query}, ensure_ascii=False)
         return json.dumps(rows, ensure_ascii=False)
 
 
@@ -41,7 +44,10 @@ class SQLiteDatabaseTool(BaseTool):
         if not query.strip().lower().startswith(("select", "with", "pragma")):
             raise ValueError("SQLite tool only permits read-only SELECT/WITH/PRAGMA statements.")
         with sqlite3.connect(self.db_path) as conn:
-            df = pd.read_sql_query(query, conn)
+            try:
+                df = pd.read_sql_query(query, conn)
+            except Exception as exc:
+                return json.dumps({"status": "sql_error", "error": repr(exc), "query": query}, ensure_ascii=False)
         return df.to_json(orient="records", force_ascii=False)
 
 
@@ -56,7 +62,10 @@ class PythonREPLTool(BaseTool):
 
     def _run(self, code: str) -> str:
         scope: Dict[str, Any] = {"pd": pd, "json": json}
-        exec(code, {"__builtins__": __builtins__}, scope)
+        try:
+            exec(code, {"__builtins__": __builtins__}, scope)
+        except Exception as exc:
+            return json.dumps({"status": "python_error", "error": repr(exc), "code": code}, ensure_ascii=False)
         return repr(scope.get("result", None))
 
 
@@ -82,6 +91,8 @@ class FileSystemTool(BaseTool):
     def _run(self, path: str, content: str | None = None) -> str:
         target = self._safe_path(path)
         if content is None:
+            if not target.exists():
+                return json.dumps({"status": "missing_file", "path": path}, ensure_ascii=False)
             return target.read_text(encoding="utf-8")
         target.write_text(content, encoding="utf-8")
         return f"wrote {target}"
