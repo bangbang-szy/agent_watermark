@@ -132,7 +132,13 @@ class MultiStatisticVotingDecoder:
                         "score": float(score),
                     }
                 )
-        ranked = pd.DataFrame(rows).sort_values("score", ascending=False)
+        candidates = pd.DataFrame(rows)
+        ranked = (
+            candidates.sort_values("score", ascending=False)
+            .groupby(["author_id", "timestamp_bucket"], as_index=False)
+            .first()
+            .sort_values("score", ascending=False)
+        )
         top = ranked.iloc[0]
         second = ranked.iloc[1]["score"] if len(ranked) > 1 else 0.0
         margin = float(top["score"] - second)
@@ -148,7 +154,7 @@ class MultiStatisticVotingDecoder:
             author_id=str(top["author_id"]),
             timestamp=str(top["timestamp"]),
             confidence=confidence,
-            votes={f"{r.author_id}|{r.timestamp}": float(r.score) for r in ranked.itertuples()},
+            votes={f"{r.author_id}|{r.timestamp_bucket}": float(r.score) for r in ranked.itertuples()},
             timestamp_bucket=str(top["timestamp_bucket"]),
             margin=margin,
             calibrated_confidence=calibrated,
