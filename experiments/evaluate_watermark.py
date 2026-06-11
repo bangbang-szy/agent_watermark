@@ -693,7 +693,6 @@ def main() -> None:
         timestamp_granularity,
         args.min_margin,
         args.min_confidence,
-        enabled=not args.skip_attacks,
     )
     attack_results = decode_attacks(
         manifest,
@@ -702,6 +701,7 @@ def main() -> None:
         timestamp_granularity,
         args.min_margin,
         args.min_confidence,
+        enabled=not args.skip_attacks,
     )
     feature_df = BehaviorFeatureExtractor().dataframe(manifest["log_path"].tolist())
     step_df = extract_step_table(manifest)
