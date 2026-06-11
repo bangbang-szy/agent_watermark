@@ -177,7 +177,26 @@ def decode_attacks(
     timestamp_granularity: str,
     min_margin: float,
     min_confidence: float,
+    enabled: bool = True,
 ) -> pd.DataFrame:
+    if not enabled:
+        return pd.DataFrame(
+            columns=[
+                "run_id",
+                "attack",
+                "severity",
+                "true_author",
+                "watermark_lambda",
+                "decoded_author",
+                "confidence",
+                "margin",
+                "calibrated_confidence",
+                "abstained",
+                "correct_author",
+                "correct_author_when_not_abstained",
+                "log_path",
+            ]
+        )
     attack_dir = out_dir / "attacked_logs"
     attack_dir.mkdir(parents=True, exist_ok=True)
     timestamps = manifest["timestamp"].drop_duplicates().tolist()
@@ -458,20 +477,27 @@ def plot_metrics(
     axes[0, 2].pie(tool_counts.values, labels=tool_counts.index, autopct="%1.0f%%", startangle=90)
     axes[0, 2].set_title("Action/tool usage")
 
-    robust = attack_results.groupby(["attack", "severity"], as_index=False).agg(
-        accuracy=("correct_author", "mean"),
-        accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
-        abstain_rate=("abstained", "mean"),
-        confidence=("confidence", "mean"),
-        margin=("margin", "mean"),
-    )
-    for attack, part in robust.groupby("attack"):
+    if attack_results.empty:
+        robust = pd.DataFrame(
+            columns=["attack", "severity", "accuracy", "accuracy_after_abstain", "abstain_rate", "confidence", "margin"]
+        )
+    else:
+        robust = attack_results.groupby(["attack", "severity"], as_index=False).agg(
+            accuracy=("correct_author", "mean"),
+            accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
+            abstain_rate=("abstained", "mean"),
+            confidence=("confidence", "mean"),
+            margin=("margin", "mean"),
+        )
+    robust_groups = [] if robust.empty else robust.groupby("attack")
+    for attack, part in robust_groups:
         axes[1, 0].plot(part["severity"], part["accuracy"], marker="o", label=attack)
     axes[1, 0].set_title("Robustness accuracy")
     axes[1, 0].set_xlabel("severity")
     axes[1, 0].set_ylabel("accuracy")
     axes[1, 0].set_ylim(0, 1.05)
-    axes[1, 0].legend(fontsize=8)
+    if not robust.empty:
+        axes[1, 0].legend(fontsize=8)
     axes[1, 0].grid(alpha=0.25)
 
     traj = feature_df["average_trajectory_length"]
@@ -511,13 +537,15 @@ def plot_metrics(
 
     robust.to_csv(out_dir / "robustness_summary.csv", index=False)
     fig, ax = plt.subplots(figsize=(9, 5))
-    for attack, part in robust.groupby("attack"):
+    robust_groups = [] if robust.empty else robust.groupby("attack")
+    for attack, part in robust_groups:
         ax.plot(part["severity"], part["confidence"], marker="o", label=attack)
     ax.set_title("Robustness mean confidence")
     ax.set_xlabel("severity")
     ax.set_ylabel("confidence")
     ax.set_ylim(0, 1.05)
-    ax.legend()
+    if not robust.empty:
+        ax.legend()
     ax.grid(alpha=0.25)
     fig.tight_layout()
     fig.savefig(plot_dir / "robustness_confidence_curve.png", dpi=180)
@@ -583,21 +611,25 @@ def plot_metrics(
             clean_confidence=("confidence", "mean"),
             clean_margin=("margin", "mean"),
         )
-        lambda_attack = attack_results.groupby("watermark_lambda", as_index=False).agg(
-            attack_accuracy=("correct_author", "mean"),
-            attack_accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
-            attack_confidence=("confidence", "mean"),
-            attack_abstain_rate=("abstained", "mean"),
-        )
-        tradeoff = lambda_manifest.merge(lambda_clean, on="watermark_lambda", how="outer").merge(
-            lambda_attack, on="watermark_lambda", how="outer"
-        )
+        if attack_results.empty:
+            tradeoff = lambda_manifest.merge(lambda_clean, on="watermark_lambda", how="outer")
+        else:
+            lambda_attack = attack_results.groupby("watermark_lambda", as_index=False).agg(
+                attack_accuracy=("correct_author", "mean"),
+                attack_accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
+                attack_confidence=("confidence", "mean"),
+                attack_abstain_rate=("abstained", "mean"),
+            )
+            tradeoff = lambda_manifest.merge(lambda_clean, on="watermark_lambda", how="outer").merge(
+                lambda_attack, on="watermark_lambda", how="outer"
+            )
         tradeoff.to_csv(out_dir / "lambda_tradeoff.csv", index=False)
         fig, ax = plt.subplots(figsize=(9, 5))
         ax.plot(tradeoff["watermark_lambda"], tradeoff["task_success"], marker="o", label="task success")
         ax.plot(tradeoff["watermark_lambda"], tradeoff["clean_accuracy"], marker="o", label="clean decode accuracy")
         ax.plot(tradeoff["watermark_lambda"], tradeoff["clean_confidence"], marker="o", label="clean confidence")
-        ax.plot(tradeoff["watermark_lambda"], tradeoff["attack_accuracy"], marker="o", label="attack decode accuracy")
+        if "attack_accuracy" in tradeoff:
+            ax.plot(tradeoff["watermark_lambda"], tradeoff["attack_accuracy"], marker="o", label="attack decode accuracy")
         ax.plot(tradeoff["watermark_lambda"], tradeoff["abstain_rate"], marker="o", label="clean abstain rate")
         ax.set_title("Watermark strength trade-off")
         ax.set_xlabel("lambda")
@@ -624,6 +656,8 @@ def main() -> None:
     parser.add_argument("--min-margin", type=float, default=0.08)
     parser.add_argument("--min-confidence", type=float, default=0.55)
     parser.add_argument("--logs", nargs="*", help="Use existing JSONL logs instead of running the agent.")
+    parser.add_argument("--max-logs", type=int, default=None, help="Limit existing logs for quick offline re-analysis.")
+    parser.add_argument("--skip-attacks", action="store_true", help="Only compute clean decoding and plots; skip attack generation.")
     parser.add_argument("--out", default="runtime/evaluation")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
@@ -639,6 +673,8 @@ def main() -> None:
 
     if args.logs:
         manifest = existing_manifest(args.logs)
+        if args.max_logs is not None:
+            manifest = manifest.head(args.max_logs)
     else:
         api_key_env = cfg.get("llm_api_key_env", "OPENAI_API_KEY")
         if not os.getenv(api_key_env):
@@ -657,6 +693,7 @@ def main() -> None:
         timestamp_granularity,
         args.min_margin,
         args.min_confidence,
+        enabled=not args.skip_attacks,
     )
     attack_results = decode_attacks(
         manifest,

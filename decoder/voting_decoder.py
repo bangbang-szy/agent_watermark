@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
 import pandas as pd
@@ -49,21 +49,20 @@ class MultiStatisticVotingDecoder:
         self.extractor = BehaviorFeatureExtractor()
         self.signature = SignatureGenerator()
 
-    def _observed_direction(self, path: str | Path) -> Dict[str, int]:
-        features = self.extractor.from_log_path(path)
+    def _observed_direction_from_steps(self, steps: Sequence) -> Dict[str, int]:
+        features = self.extractor.from_steps(list(steps))
         signs = {}
         for name in FEATURE_NAMES:
             value = features.get(name, 0.0)
             signs[name] = 1 if value >= 0.5 else -1
         return signs
 
-    def _feature_vote(self, path: str | Path, identity: WatermarkIdentity) -> float:
+    def _feature_vote(self, observed: Dict[str, int], identity: WatermarkIdentity) -> float:
         """Weak auxiliary vote from aggregate trajectory statistics.
 
         This vote is intentionally low-weight because one short run can be too
         sparse for stable behavioral frequencies.
         """
-        observed = self._observed_direction(path)
         expected = self.signature.feature_signature(identity, self.timestamp_granularity)
         return float(np.mean([1.0 if observed[k] == expected[k] else 0.0 for k in FEATURE_NAMES]))
 
@@ -81,7 +80,7 @@ class MultiStatisticVotingDecoder:
                     margins.append(candidate.watermark_phi * self.signature.tool_phi(identity, candidate.name))
         return float(np.mean(margins)) if margins else 0.0
 
-    def _action_delta_alignment(self, path: str | Path, identity: WatermarkIdentity) -> float:
+    def _action_delta_alignment(self, steps: Sequence, identity: WatermarkIdentity) -> float:
         """Recover the watermark by comparing relative log-probability shifts.
 
         For each action-selection step the embedder applies:
@@ -93,7 +92,6 @@ class MultiStatisticVotingDecoder:
         only on execution logs: raw probabilities, watermarked probabilities,
         and candidate action names.
         """
-        steps = JsonlExecutionLogger.read(path)
         similarities: List[float] = []
         for step in steps:
             if len(step.candidate_actions) < 2:
@@ -117,12 +115,14 @@ class MultiStatisticVotingDecoder:
         return float((np.mean(similarities) + 1.0) / 2.0)
 
     def decode(self, path: str | Path) -> DecodeResult:
+        steps = JsonlExecutionLogger.read(path)
+        observed = self._observed_direction_from_steps(steps)
         rows = []
         for author in self.candidate_authors:
             for ts in self.candidate_timestamps:
                 identity = WatermarkIdentity(author, ts)
-                feature_vote = self._feature_vote(path, identity)
-                action_vote = self._action_delta_alignment(path, identity)
+                feature_vote = self._feature_vote(observed, identity)
+                action_vote = self._action_delta_alignment(steps, identity)
                 score = self.action_weight * action_vote + self.feature_weight * feature_vote
                 rows.append(
                     {
