@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from pathlib import Path
 from typing import Dict, Iterable, List
@@ -22,13 +23,43 @@ class BehaviorFeatureExtractor:
         tool_steps = [a for a in chosen if a != "final_answer"]
         transitions = list(zip(chosen[:-1], chosen[1:]))
         first_rank_hits = []
+        candidate_margins = []
+        chosen_gains = []
         for step in steps:
             ranked = sorted(step.candidate_actions, key=lambda c: c.raw_probability, reverse=True)
             first_rank_hits.append(1.0 if ranked and ranked[0].name == step.chosen_action else 0.0)
+            raw_probs = sorted([c.raw_probability for c in step.candidate_actions], reverse=True)
+            if len(raw_probs) >= 2:
+                candidate_margins.append(raw_probs[0] - raw_probs[1])
+            for candidate in step.candidate_actions:
+                if candidate.name == step.chosen_action:
+                    chosen_gains.append(candidate.watermarked_probability - candidate.raw_probability)
         transition_hash = 0.0
         if transitions:
             counts = Counter(transitions)
-            transition_hash = sum((hash(a + "->" + b) % 997) * n for (a, b), n in counts.items()) / (997 * len(transitions))
+            transition_hash = sum(
+                (int(hashlib.sha256(f"{a}->{b}".encode("utf-8")).hexdigest()[:8], 16) % 997) * n
+                for (a, b), n in counts.items()
+            ) / (997 * len(transitions))
+        tool_counts = Counter(tool_steps)
+        tool_probs = np.asarray(list(tool_counts.values()), dtype=float)
+        if tool_probs.size:
+            tool_probs = tool_probs / tool_probs.sum()
+            tool_entropy = float(-(tool_probs * np.log2(np.clip(tool_probs, 1e-12, 1.0))).sum())
+        else:
+            tool_entropy = 0.0
+        error_steps = [
+            step
+            for step in steps
+            if step.tool_call
+            and (
+                step.tool_call.error
+                or (
+                    isinstance(step.tool_call.observation, str)
+                    and any(marker in step.tool_call.observation for marker in ["search_error", "sql_error", "python_error"])
+                )
+            )
+        ]
         return {
             "tool_usage_frequency": len(tool_steps) / len(steps),
             "search_tool_ratio": chosen.count("search") / max(1, len(tool_steps)),
@@ -37,6 +68,11 @@ class BehaviorFeatureExtractor:
             "tool_transition_pattern": float(transition_hash),
             "action_rank_preference": float(np.mean(first_rank_hits)),
             "database_query_ratio": chosen.count("sqlite_db") / max(1, len(tool_steps)),
+            "unique_tool_ratio": len(set(tool_steps)) / max(1, len(tool_steps)),
+            "candidate_margin_mean": float(np.mean(candidate_margins)) if candidate_margins else 0.0,
+            "chosen_probability_gain": float(np.mean(chosen_gains)) if chosen_gains else 0.0,
+            "tool_entropy": tool_entropy,
+            "tool_error_ratio": len(error_steps) / max(1, len(tool_steps)),
         }
 
     def from_log_path(self, path: str | Path) -> Dict[str, float]:

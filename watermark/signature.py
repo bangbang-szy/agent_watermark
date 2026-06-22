@@ -16,6 +16,11 @@ FEATURE_NAMES = [
     "tool_transition_pattern",
     "action_rank_preference",
     "database_query_ratio",
+    "unique_tool_ratio",
+    "candidate_margin_mean",
+    "chosen_probability_gain",
+    "tool_entropy",
+    "tool_error_ratio",
 ]
 
 

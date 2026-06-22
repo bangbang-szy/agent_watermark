@@ -170,6 +170,51 @@ def decode_clean(
     return pd.DataFrame(rows)
 
 
+def calibrate_margin_threshold(
+    clean_results: pd.DataFrame,
+    min_confidence: float,
+    target_accuracy: float,
+) -> float:
+    """Choose the lowest margin threshold that reaches target selective accuracy."""
+    thresholds = sorted(set([0.0] + [float(v) for v in clean_results["margin"].dropna().tolist()]))
+    best_threshold = thresholds[-1] if thresholds else 0.0
+    best_coverage = -1.0
+    for threshold in thresholds:
+        retained = clean_results[
+            (clean_results["margin"] >= threshold)
+            & (clean_results["confidence"] >= min_confidence)
+        ]
+        if retained.empty:
+            continue
+        accuracy = float(retained["correct_author"].mean())
+        coverage = float(len(retained) / len(clean_results))
+        if accuracy >= target_accuracy and coverage > best_coverage:
+            best_threshold = threshold
+            best_coverage = coverage
+    return float(best_threshold)
+
+
+def apply_abstention_policy(
+    results: pd.DataFrame,
+    min_margin: float,
+    min_confidence: float,
+) -> pd.DataFrame:
+    """Recompute abstention columns under a calibrated threshold."""
+    updated = results.copy()
+    updated["abstained"] = (updated["margin"] < min_margin) | (updated["confidence"] < min_confidence)
+    updated["abstain_reason"] = np.where(
+        updated["margin"] < min_margin,
+        "low_margin",
+        np.where(updated["confidence"] < min_confidence, "low_confidence", None),
+    )
+    updated["correct_author_when_not_abstained"] = np.where(
+        updated["abstained"],
+        np.nan,
+        updated["correct_author"],
+    )
+    return updated
+
+
 def decode_attacks(
     manifest: pd.DataFrame,
     candidate_authors: List[str],
@@ -264,6 +309,12 @@ def extract_step_table(manifest: pd.DataFrame) -> pd.DataFrame:
                     "chosen_action": step.chosen_action,
                     "candidate_count": len(step.candidate_actions),
                     "is_final": step.chosen_action == "final_answer",
+                    "tool_error": bool(step.tool_call and step.tool_call.error),
+                    "structured_tool_error": bool(
+                        step.tool_call
+                        and isinstance(step.tool_call.observation, str)
+                        and any(marker in step.tool_call.observation for marker in ["search_error", "sql_error", "python_error"])
+                    ),
                 }
             )
     return pd.DataFrame(rows)
@@ -286,7 +337,7 @@ def votes_table(clean_results: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame) -> pd.DataFrame:
+def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame, min_margin: float) -> pd.DataFrame:
     """Aggregate multiple runs by lambda/repeat/true author for paper-style group decoding."""
     merged = clean_results.merge(
         manifest[["run_id", "watermark_lambda", "repeat", "task_success"]],
@@ -308,6 +359,9 @@ def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame) -> pd.Da
         top_candidate, top_score = ranked[0]
         second_score = ranked[1][1] if len(ranked) > 1 else 0.0
         decoded_author, decoded_timestamp = top_candidate.split("|", 1)
+        margin = float(top_score - second_score)
+        margin_per_run = margin / max(1, len(part))
+        abstained = margin_per_run < min_margin
         rows.append(
             {
                 "watermark_lambda": watermark_lambda,
@@ -317,10 +371,61 @@ def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame) -> pd.Da
                 "decoded_timestamp": decoded_timestamp,
                 "num_runs": int(len(part)),
                 "task_success_rate": float(part["task_success"].mean()),
-                "aggregate_margin": float(top_score - second_score),
+                "aggregate_margin": margin,
+                "aggregate_margin_per_run": margin_per_run,
+                "abstained": abstained,
                 "correct_author": decoded_author == true_author,
+                "correct_author_when_not_abstained": (decoded_author == true_author) if not abstained else np.nan,
             }
         )
+    return pd.DataFrame(rows)
+
+
+def aggregate_by_prefix(
+    clean_results: pd.DataFrame,
+    manifest: pd.DataFrame,
+    min_margin: float,
+    max_group_size: int = 6,
+) -> pd.DataFrame:
+    """Show how accumulating more trajectories changes coverage and accuracy."""
+    merged = clean_results.merge(
+        manifest[["run_id", "watermark_lambda", "repeat", "task_success"]],
+        on="run_id",
+        how="left",
+    ).sort_values(["watermark_lambda", "repeat", "run_id"])
+    rows = []
+    for keys, part in merged.groupby(["watermark_lambda", "repeat", "true_author"], dropna=False):
+        watermark_lambda, repeat, true_author = keys
+        max_k = min(max_group_size, len(part))
+        for group_size in range(1, max_k + 1):
+            subset = part.head(group_size)
+            vote_sums: Dict[str, float] = {}
+            for votes in subset["votes"]:
+                if isinstance(votes, str):
+                    votes = ast.literal_eval(votes)
+                for candidate, score in votes.items():
+                    vote_sums[candidate] = vote_sums.get(candidate, 0.0) + float(score)
+            ranked = sorted(vote_sums.items(), key=lambda kv: kv[1], reverse=True)
+            if not ranked:
+                continue
+            decoded_author = ranked[0][0].split("|", 1)[0]
+            second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+            margin_per_run = float((ranked[0][1] - second_score) / group_size)
+            abstained = margin_per_run < min_margin
+            rows.append(
+                {
+                    "watermark_lambda": watermark_lambda,
+                    "repeat": repeat,
+                    "true_author": true_author,
+                    "group_size": group_size,
+                    "decoded_author": decoded_author,
+                    "margin_per_run": margin_per_run,
+                    "abstained": abstained,
+                    "coverage": 0.0 if abstained else 1.0,
+                    "correct_author": decoded_author == true_author,
+                    "correct_author_when_not_abstained": (decoded_author == true_author) if not abstained else np.nan,
+                }
+            )
     return pd.DataFrame(rows)
 
 
@@ -444,7 +549,10 @@ def plot_metrics(
     step_df: pd.DataFrame,
     vote_df: pd.DataFrame,
     ablation_df: pd.DataFrame,
+    aggregate_prefix_df: pd.DataFrame,
     out_dir: Path,
+    effective_min_margin: float,
+    target_selective_accuracy: float,
 ) -> None:
     plot_dir = out_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -457,6 +565,9 @@ def plot_metrics(
         "clean_mean_margin": float(clean_results["margin"].mean()),
         "clean_abstain_rate": float(clean_results["abstained"].mean()),
         "clean_author_accuracy_after_abstain": float(clean_results["correct_author_when_not_abstained"].mean()),
+        "coverage_after_abstain": float(1.0 - clean_results["abstained"].mean()),
+        "effective_min_margin": float(effective_min_margin),
+        "target_selective_accuracy": float(target_selective_accuracy),
         "task_success_rate": float(manifest["task_success"].mean()) if "task_success" in manifest else None,
         "num_runs": int(len(manifest)),
         "num_steps": int(len(step_df)),
@@ -476,6 +587,13 @@ def plot_metrics(
     tool_counts = step_df["chosen_action"].value_counts()
     axes[0, 2].pie(tool_counts.values, labels=tool_counts.index, autopct="%1.0f%%", startangle=90)
     axes[0, 2].set_title("Action/tool usage")
+
+    tool_diagnostics = step_df.groupby("chosen_action", as_index=False).agg(
+        steps=("run_id", "count"),
+        tool_error_rate=("tool_error", "mean"),
+        structured_error_rate=("structured_tool_error", "mean"),
+    )
+    tool_diagnostics.to_csv(out_dir / "tool_diagnostics.csv", index=False)
 
     if attack_results.empty:
         robust = pd.DataFrame(
@@ -551,6 +669,21 @@ def plot_metrics(
     fig.savefig(plot_dir / "robustness_confidence_curve.png", dpi=180)
     plt.close(fig)
 
+    fig, ax = plt.subplots(figsize=(8, 5))
+    x = np.arange(len(tool_diagnostics))
+    width = 0.35
+    ax.bar(x - width / 2, tool_diagnostics["tool_error_rate"], width=width, label="tool exception")
+    ax.bar(x + width / 2, tool_diagnostics["structured_error_rate"], width=width, label="structured error")
+    ax.set_xticks(x, tool_diagnostics["chosen_action"], rotation=25, ha="right")
+    ax.set_ylim(0, 1.05)
+    ax.set_title("Tool reliability diagnostics")
+    ax.set_ylabel("error rate")
+    ax.legend()
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(plot_dir / "tool_reliability.png", dpi=180)
+    plt.close(fig)
+
     thresholds = np.linspace(0.0, 0.30, 16)
     cal_rows = []
     for threshold in thresholds:
@@ -600,6 +733,33 @@ def plot_metrics(
     fig.tight_layout()
     fig.savefig(plot_dir / "decoder_ablation.png", dpi=180)
     plt.close(fig)
+
+    if not aggregate_prefix_df.empty:
+        aggregate_summary = aggregate_prefix_df.groupby("group_size", as_index=False).agg(
+            accuracy=("correct_author", "mean"),
+            accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
+            coverage=("coverage", "mean"),
+            margin_per_run=("margin_per_run", "mean"),
+        )
+        aggregate_summary.to_csv(out_dir / "aggregate_group_size_summary.csv", index=False)
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(aggregate_summary["group_size"], aggregate_summary["accuracy"], marker="o", label="accuracy")
+        ax.plot(
+            aggregate_summary["group_size"],
+            aggregate_summary["accuracy_after_abstain"],
+            marker="o",
+            label="accuracy after abstain",
+        )
+        ax.plot(aggregate_summary["group_size"], aggregate_summary["coverage"], marker="o", label="coverage")
+        ax.set_title("Multi-run aggregation effect")
+        ax.set_xlabel("runs aggregated")
+        ax.set_ylabel("score")
+        ax.set_ylim(0, 1.05)
+        ax.legend()
+        ax.grid(alpha=0.25)
+        fig.tight_layout()
+        fig.savefig(plot_dir / "aggregate_group_size_curve.png", dpi=180)
+        plt.close(fig)
 
     if "watermark_lambda" in manifest and manifest["watermark_lambda"].notna().any():
         lambda_manifest = manifest.groupby("watermark_lambda", as_index=False).agg(task_success=("task_success", "mean"))
@@ -655,6 +815,8 @@ def main() -> None:
     parser.add_argument("--timestamp-granularity", choices=["exact", "minute", "hour", "day"], default=None)
     parser.add_argument("--min-margin", type=float, default=0.08)
     parser.add_argument("--min-confidence", type=float, default=0.55)
+    parser.add_argument("--auto-calibrate-threshold", action="store_true")
+    parser.add_argument("--target-selective-accuracy", type=float, default=0.95)
     parser.add_argument("--logs", nargs="*", help="Use existing JSONL logs instead of running the agent.")
     parser.add_argument("--max-logs", type=int, default=None, help="Limit existing logs for quick offline re-analysis.")
     parser.add_argument("--skip-attacks", action="store_true", help="Only compute clean decoding and plots; skip attack generation.")
@@ -691,27 +853,36 @@ def main() -> None:
         manifest,
         args.authors,
         timestamp_granularity,
-        args.min_margin,
+        0.0 if args.auto_calibrate_threshold else args.min_margin,
         args.min_confidence,
     )
+    effective_min_margin = args.min_margin
+    if args.auto_calibrate_threshold:
+        effective_min_margin = calibrate_margin_threshold(
+            clean_results,
+            args.min_confidence,
+            args.target_selective_accuracy,
+        )
+        clean_results = apply_abstention_policy(clean_results, effective_min_margin, args.min_confidence)
     attack_results = decode_attacks(
         manifest,
         args.authors,
         out_dir,
         timestamp_granularity,
-        args.min_margin,
+        effective_min_margin,
         args.min_confidence,
         enabled=not args.skip_attacks,
     )
     feature_df = BehaviorFeatureExtractor().dataframe(manifest["log_path"].tolist())
     step_df = extract_step_table(manifest)
     vote_df = votes_table(clean_results)
-    aggregate_df = aggregate_runs(clean_results, manifest)
+    aggregate_df = aggregate_runs(clean_results, manifest, effective_min_margin)
+    aggregate_prefix_df = aggregate_by_prefix(clean_results, manifest, effective_min_margin)
     ablation_df = decoder_ablation(
         manifest,
         args.authors,
         timestamp_granularity,
-        args.min_margin,
+        effective_min_margin,
         args.min_confidence,
     )
 
@@ -721,8 +892,21 @@ def main() -> None:
     step_df.to_csv(out_dir / "step_actions.csv", index=False)
     vote_df.to_csv(out_dir / "vote_scores.csv", index=False)
     aggregate_df.to_csv(out_dir / "aggregate_decoding_results.csv", index=False)
+    aggregate_prefix_df.to_csv(out_dir / "aggregate_group_size_results.csv", index=False)
     ablation_df.to_csv(out_dir / "decoder_ablation.csv", index=False)
-    plot_metrics(manifest, clean_results, attack_results, feature_df, step_df, vote_df, ablation_df, out_dir)
+    plot_metrics(
+        manifest,
+        clean_results,
+        attack_results,
+        feature_df,
+        step_df,
+        vote_df,
+        ablation_df,
+        aggregate_prefix_df,
+        out_dir,
+        effective_min_margin,
+        args.target_selective_accuracy,
+    )
 
     print(json.dumps(json.loads((out_dir / "summary.json").read_text(encoding="utf-8")), indent=2))
     print(f"plots: {out_dir / 'plots'}")

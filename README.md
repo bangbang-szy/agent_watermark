@@ -183,6 +183,8 @@ python -m agent_watermark.experiments.evaluate_watermark \
   --timestamp-granularity hour \
   --min-margin 0.08 \
   --min-confidence 0.55 \
+  --auto-calibrate-threshold \
+  --target-selective-accuracy 0.95 \
   --out runtime/evaluation_lambda_sweep
 ```
 
@@ -204,11 +206,15 @@ Outputs:
 - `runtime/evaluation/plots/lambda_tradeoff_curve.png` when `--lambda-values` is used
 - `runtime/evaluation/plots/coverage_accuracy_calibration.png`
 - `runtime/evaluation/plots/decoder_ablation.png`
+- `runtime/evaluation/plots/aggregate_group_size_curve.png`
+- `runtime/evaluation/plots/tool_reliability.png`
 - CSV tables for clean decoding, attack decoding, behavior features, tool actions, and vote scores
 - `aggregate_decoding_results.csv` for multi-run grouped decoding
+- `aggregate_group_size_results.csv` and `aggregate_group_size_summary.csv` for multi-run coverage analysis
 - `calibration_curve.csv` for abstention threshold analysis
 - `statistical_summary.csv` with mean, standard error, and 95% CI
 - `decoder_ablation.csv` and `decoder_ablation_summary.csv` comparing full, action-only, and feature-only decoders
+- `tool_diagnostics.csv` for real tool reliability and task-success analysis
 
 The evaluation script includes clean decoding plus robustness attacks:
 
