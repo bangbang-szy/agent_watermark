@@ -215,6 +215,7 @@ Outputs:
 - `statistical_summary.csv` with mean, standard error, and 95% CI
 - `decoder_ablation.csv` and `decoder_ablation_summary.csv` comparing full, action-only, and feature-only decoders
 - `tool_diagnostics.csv` for real tool reliability and task-success analysis
+- `robustness_accuracy_matrix.png` for attack-by-severity recovery accuracy
 
 For morning-report style experiments that focus on reducing abstention and improving deployment readiness:
 
@@ -232,6 +233,30 @@ python -m agent_watermark.experiments.evaluate_watermark \
   --min-confidence 0.55 \
   --out runtime/morning_report_v3
 ```
+
+For a larger robustness run with multiple authors and a broader attack matrix:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --config configs/deepseek.yaml \
+  --watermarked-authors alice-lab bob-lab carol-lab \
+  --authors alice-lab bob-lab carol-lab \
+  --tasks 0 \
+  --repeats 2 \
+  --lambda-values 0.06 0.12 0.18 \
+  --timestamp-granularity hour \
+  --auto-calibrate-threshold \
+  --target-selective-accuracy 0.95 \
+  --min-confidence 0.55 \
+  --crop-ratios 0.1 0.2 0.3 0.4 0.5 \
+  --noise-sigmas 0.01 0.03 0.05 0.08 0.10 \
+  --tool-deletion-ratios 0.3 0.5 0.7 \
+  --preference-tools search sqlite_db python_repl \
+  --out runtime/full_robustness_report
+```
+
+This full setting runs `3 authors x 16 tasks x 2 repeats x 3 lambdas = 288` real agent trajectories before attacks.
+For a cheaper version, use `--tasks 8 --repeats 1`.
 
 The summary now separates `task_success_rate` from `strict_task_success_rate`. The first checks whether
 the agent produced a usable final answer; the second treats any intermediate tool error as a failed trajectory,

@@ -234,13 +234,22 @@ def decode_attacks(
     min_margin: float,
     min_confidence: float,
     enabled: bool = True,
+    crop_ratios: List[float] | None = None,
+    noise_sigmas: List[float] | None = None,
+    tool_deletion_ratios: List[float] | None = None,
+    preference_tools: List[str] | None = None,
 ) -> pd.DataFrame:
+    crop_ratios = crop_ratios or [0.1, 0.2, 0.3]
+    noise_sigmas = noise_sigmas or [0.01, 0.03, 0.05]
+    tool_deletion_ratios = tool_deletion_ratios or [0.3]
+    preference_tools = preference_tools or ["search"]
     if not enabled:
         return pd.DataFrame(
             columns=[
                 "run_id",
                 "attack",
                 "severity",
+                "variant",
                 "true_author",
                 "watermark_lambda",
                 "decoded_author",
@@ -265,34 +274,38 @@ def decode_attacks(
     )
     rows = []
     for item in manifest.itertuples():
-        attack_specs = [("clean", 0.0, Path(item.log_path))]
-        for ratio in [0.1, 0.2, 0.3]:
+        attack_specs = [("clean", 0.0, "none", Path(item.log_path))]
+        for ratio in crop_ratios:
             target = attack_dir / f"{item.run_id}_crop_{int(ratio * 100)}.jsonl"
             crop_log(Path(item.log_path), ratio, target)
-            attack_specs.append(("log_crop", ratio, target))
+            attack_specs.append(("log_crop", ratio, "random_step_drop", target))
         rewritten = attack_dir / f"{item.run_id}_rewrite.jsonl"
         rewrite_output(Path(item.log_path), rewritten)
-        attack_specs.append(("output_rewrite", 0.0, rewritten))
-        tuned = attack_dir / f"{item.run_id}_preference_drift.jsonl"
-        lightweight_finetune_attack(Path(item.log_path), tuned, preferred_tool="search")
-        attack_specs.append(("preference_drift", 0.0, tuned))
+        attack_specs.append(("output_rewrite", 0.0, "final_answer_only", rewritten))
+        for preferred_tool in preference_tools:
+            tuned = attack_dir / f"{item.run_id}_preference_drift_{preferred_tool}.jsonl"
+            lightweight_finetune_attack(Path(item.log_path), tuned, preferred_tool=preferred_tool)
+            attack_specs.append(("preference_drift", 0.0, preferred_tool, tuned))
         reordered = attack_dir / f"{item.run_id}_reordered.jsonl"
         reorder_log_attack(Path(item.log_path), reordered)
-        attack_specs.append(("log_reorder", 0.0, reordered))
-        for sigma in [0.01, 0.03, 0.05]:
+        attack_specs.append(("log_reorder", 0.0, "pairwise_swap", reordered))
+        for sigma in noise_sigmas:
             noisy = attack_dir / f"{item.run_id}_prob_noise_{int(sigma * 100)}.jsonl"
             probability_noise_attack(Path(item.log_path), noisy, sigma=sigma)
-            attack_specs.append(("probability_noise", sigma, noisy))
-        deleted = attack_dir / f"{item.run_id}_tool_call_delete.jsonl"
-        tool_call_deletion_attack(Path(item.log_path), deleted, ratio=0.3)
-        attack_specs.append(("tool_call_deletion", 0.3, deleted))
-        for attack, severity, path in attack_specs:
+            attack_specs.append(("probability_noise", sigma, "gaussian_probability", noisy))
+        for ratio in tool_deletion_ratios:
+            deleted = attack_dir / f"{item.run_id}_tool_call_delete_{int(ratio * 100)}.jsonl"
+            tool_call_deletion_attack(Path(item.log_path), deleted, ratio=ratio)
+            attack_specs.append(("tool_call_deletion", ratio, "observation_delete", deleted))
+        for attack, severity, variant, path in attack_specs:
             decoded = decoder.decode(path)
             rows.append(
                 {
                     "run_id": item.run_id,
                     "attack": attack,
                     "severity": severity,
+                    "variant": variant,
+                    "attack_label": f"{attack}:{variant}",
                     "true_author": item.author_id,
                     "watermark_lambda": getattr(item, "watermark_lambda", float("nan")),
                     "decoded_author": decoded.author_id,
@@ -538,8 +551,8 @@ def write_statistical_summary(
                     "n": int(part[column].notna().sum()),
                 }
             )
-    for keys, part in attack_results.groupby(["attack", "severity"], dropna=False):
-        attack, severity = keys
+    for keys, part in attack_results.groupby(["attack", "variant", "severity"], dropna=False):
+        attack, variant, severity = keys
         for metric, column in [
             ("attack_author_accuracy", "correct_author"),
             ("attack_accuracy_after_abstain", "correct_author_when_not_abstained"),
@@ -551,6 +564,7 @@ def write_statistical_summary(
             rows.append(
                 {
                     "condition": f"{attack}:{severity}",
+                    "variant": variant,
                     "metric": metric,
                     "mean": mean,
                     "standard_error": se,
@@ -635,19 +649,19 @@ def plot_metrics(
 
     if attack_results.empty:
         robust = pd.DataFrame(
-            columns=["attack", "severity", "accuracy", "accuracy_after_abstain", "abstain_rate", "confidence", "margin"]
+            columns=["attack", "variant", "attack_label", "severity", "accuracy", "accuracy_after_abstain", "abstain_rate", "confidence", "margin"]
         )
     else:
-        robust = attack_results.groupby(["attack", "severity"], as_index=False).agg(
+        robust = attack_results.groupby(["attack", "variant", "attack_label", "severity"], as_index=False).agg(
             accuracy=("correct_author", "mean"),
             accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
             abstain_rate=("abstained", "mean"),
             confidence=("confidence", "mean"),
             margin=("margin", "mean"),
         )
-    robust_groups = [] if robust.empty else robust.groupby("attack")
-    for attack, part in robust_groups:
-        axes[1, 0].plot(part["severity"], part["accuracy"], marker="o", label=attack)
+    robust_groups = [] if robust.empty else robust.groupby("attack_label")
+    for attack_label, part in robust_groups:
+        axes[1, 0].plot(part["severity"], part["accuracy"], marker="o", label=attack_label)
     axes[1, 0].set_title("Robustness accuracy")
     axes[1, 0].set_xlabel("severity")
     axes[1, 0].set_ylabel("accuracy")
@@ -693,9 +707,9 @@ def plot_metrics(
 
     robust.to_csv(out_dir / "robustness_summary.csv", index=False)
     fig, ax = plt.subplots(figsize=(9, 5))
-    robust_groups = [] if robust.empty else robust.groupby("attack")
-    for attack, part in robust_groups:
-        ax.plot(part["severity"], part["confidence"], marker="o", label=attack)
+    robust_groups = [] if robust.empty else robust.groupby("attack_label")
+    for attack_label, part in robust_groups:
+        ax.plot(part["severity"], part["confidence"], marker="o", label=attack_label)
     ax.set_title("Robustness mean confidence")
     ax.set_xlabel("severity")
     ax.set_ylabel("confidence")
@@ -706,6 +720,20 @@ def plot_metrics(
     fig.tight_layout()
     fig.savefig(plot_dir / "robustness_confidence_curve.png", dpi=180)
     plt.close(fig)
+
+    if not robust.empty:
+        heatmap = robust.pivot_table(index="attack_label", columns="severity", values="accuracy", aggfunc="mean")
+        fig, ax = plt.subplots(figsize=(10, max(4, 0.35 * len(heatmap))))
+        im = ax.imshow(heatmap.to_numpy(), aspect="auto", cmap="viridis", vmin=0, vmax=1)
+        ax.set_title("Robustness accuracy matrix")
+        ax.set_xlabel("severity")
+        ax.set_ylabel("attack")
+        ax.set_xticks(range(len(heatmap.columns)), [str(c) for c in heatmap.columns], rotation=30, ha="right")
+        ax.set_yticks(range(len(heatmap.index)), heatmap.index)
+        fig.colorbar(im, ax=ax, label="accuracy")
+        fig.tight_layout()
+        fig.savefig(plot_dir / "robustness_accuracy_matrix.png", dpi=180)
+        plt.close(fig)
 
     fig, ax = plt.subplots(figsize=(8, 5))
     x = np.arange(len(tool_diagnostics))
@@ -847,6 +875,7 @@ def main() -> None:
     parser.add_argument("--config", default=str(Path(__file__).parents[1] / "configs/deepseek.yaml"))
     parser.add_argument("--authors", nargs="+", default=["alice-lab", "bob-lab", "carol-lab"])
     parser.add_argument("--watermarked-author", default="alice-lab")
+    parser.add_argument("--watermarked-authors", nargs="+", default=None)
     parser.add_argument("--tasks", type=int, default=6, help="Number of built-in tasks to run. Use 0 for all tasks.")
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--lambda-values", nargs="+", type=float, default=None)
@@ -858,6 +887,10 @@ def main() -> None:
     parser.add_argument("--logs", nargs="*", help="Use existing JSONL logs instead of running the agent.")
     parser.add_argument("--max-logs", type=int, default=None, help="Limit existing logs for quick offline re-analysis.")
     parser.add_argument("--skip-attacks", action="store_true", help="Only compute clean decoding and plots; skip attack generation.")
+    parser.add_argument("--crop-ratios", nargs="+", type=float, default=[0.1, 0.2, 0.3])
+    parser.add_argument("--noise-sigmas", nargs="+", type=float, default=[0.01, 0.03, 0.05])
+    parser.add_argument("--tool-deletion-ratios", nargs="+", type=float, default=[0.3])
+    parser.add_argument("--preference-tools", nargs="+", default=["search"])
     parser.add_argument("--out", default="runtime/evaluation")
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
@@ -881,7 +914,8 @@ def main() -> None:
             raise RuntimeError(f"Set {api_key_env} before running evaluation.")
         task_limit = None if args.tasks == 0 else args.tasks
         lambda_values = args.lambda_values or [float(cfg["watermark_lambda"])]
-        manifest = run_logs(cfg, [args.watermarked_author], select_tasks(task_limit), args.repeats, lambda_values)
+        run_authors = args.watermarked_authors or [args.watermarked_author]
+        manifest = run_logs(cfg, run_authors, select_tasks(task_limit), args.repeats, lambda_values)
 
     if manifest.empty:
         raise RuntimeError("No logs available for evaluation.")
@@ -910,6 +944,10 @@ def main() -> None:
         effective_min_margin,
         args.min_confidence,
         enabled=not args.skip_attacks,
+        crop_ratios=args.crop_ratios,
+        noise_sigmas=args.noise_sigmas,
+        tool_deletion_ratios=args.tool_deletion_ratios,
+        preference_tools=args.preference_tools,
     )
     feature_df = BehaviorFeatureExtractor().dataframe(manifest["log_path"].tolist())
     step_df = extract_step_table(manifest)
