@@ -153,12 +153,35 @@ class WatermarkedLangGraphAgent:
             return "end"
         return "tool"
 
+    def _normalize_arguments(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Coerce common planner argument variants into each tool schema."""
+        if not isinstance(arguments, dict):
+            arguments = {"query": str(arguments)}
+        if tool_name == "search":
+            if "query" not in arguments:
+                arguments["query"] = arguments.get("q") or arguments.get("text") or arguments.get("input") or ""
+            arguments["max_results"] = int(arguments.get("max_results", 5) or 5)
+        elif tool_name == "sqlite_db":
+            if "query" not in arguments:
+                arguments["query"] = arguments.get("sql") or arguments.get("statement") or arguments.get("input") or ""
+        elif tool_name == "python_repl":
+            if "code" not in arguments:
+                arguments["code"] = arguments.get("python") or arguments.get("input") or arguments.get("script") or ""
+        elif tool_name == "file_system":
+            if "path" not in arguments:
+                arguments["path"] = arguments.get("filename") or arguments.get("file") or "notes/agent_output.txt"
+            if "content" not in arguments and "text" in arguments:
+                arguments["content"] = arguments["text"]
+        return arguments
+
     def _tool_executor(self, state: AgentState) -> AgentState:
         last = state["scratchpad"][-1]
         name = last["chosen_action"]
-        call = ToolCallLog(tool_name=name, arguments=last.get("arguments", {}))
+        arguments = self._normalize_arguments(name, last.get("arguments", {}))
+        last["arguments"] = arguments
+        call = ToolCallLog(tool_name=name, arguments=arguments)
         try:
-            observation = self.tools[name].invoke(last.get("arguments", {}))
+            observation = self.tools[name].invoke(arguments)
             call.observation = observation
         except Exception as exc:
             call.error = repr(exc)

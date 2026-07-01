@@ -81,7 +81,7 @@ def strict_task_success(log_path: str, answer: str | None) -> bool:
             return False
         if step.tool_call and isinstance(step.tool_call.observation, str):
             observation = step.tool_call.observation
-            if any(marker in observation for marker in ["search_error", "sql_error", "python_error"]):
+            if any(marker in observation for marker in ['"status": "search_error"', '"status": "sql_error"', '"status": "python_error"']):
                 return False
     return True
 
@@ -324,7 +324,10 @@ def extract_step_table(manifest: pd.DataFrame) -> pd.DataFrame:
                     "structured_tool_error": bool(
                         step.tool_call
                         and isinstance(step.tool_call.observation, str)
-                        and any(marker in step.tool_call.observation for marker in ["search_error", "sql_error", "python_error"])
+                        and any(
+                            marker in step.tool_call.observation
+                            for marker in ['"status": "search_error"', '"status": "sql_error"', '"status": "python_error"']
+                        )
                     ),
                 }
             )

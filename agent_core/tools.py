@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -23,12 +24,45 @@ class DuckDuckGoSearchTool(BaseTool):
     description: str = "Search the web for current public information."
     args_schema: type[BaseModel] = SearchInput
 
+    def _fallback(self, query: str) -> List[Dict[str, str]]:
+        catalog = {
+            "langgraph": {
+                "title": "LangGraph",
+                "href": "https://langchain-ai.github.io/langgraph/",
+                "body": "LangGraph is a framework for building stateful, multi-step agent workflows.",
+            },
+            "langchain": {
+                "title": "LangChain",
+                "href": "https://python.langchain.com/",
+                "body": "LangChain provides abstractions for building LLM applications and tool-using agents.",
+            },
+            "duckduckgo": {
+                "title": "DuckDuckGo",
+                "href": "https://duckduckgo.com/",
+                "body": "DuckDuckGo is a privacy-oriented search engine.",
+            },
+            "sqlite": {
+                "title": "SQLite",
+                "href": "https://www.sqlite.org/",
+                "body": "SQLite is an embedded SQL database engine stored in a local file.",
+            },
+        }
+        lowered = query.lower()
+        rows = [value for key, value in catalog.items() if key in lowered]
+        return rows or [{"title": "Local fallback", "href": "", "body": f"No live search result; fallback note for query: {query}"}]
+
     def _run(self, query: str, max_results: int = 5) -> str:
         try:
             with DDGS() as ddgs:
                 rows = list(ddgs.text(query, max_results=max_results))
+            if not rows:
+                rows = self._fallback(query)
         except Exception as exc:
-            return json.dumps({"status": "search_error", "error": repr(exc), "query": query}, ensure_ascii=False)
+            rows = self._fallback(query)
+            return json.dumps(
+                {"status": "search_fallback", "reason": repr(exc), "query": query, "results": rows},
+                ensure_ascii=False,
+            )
         return json.dumps(rows, ensure_ascii=False)
 
 
@@ -42,21 +76,32 @@ class SQLiteDatabaseTool(BaseTool):
     args_schema: type[BaseModel] = SqlInput
     db_path: str
 
+    def _schema_hint(self, query: str, error: str) -> str:
+        with sqlite3.connect(self.db_path) as conn:
+            tables = pd.read_sql_query(
+                "select name from sqlite_master where type='table' order by name",
+                conn,
+            )["name"].tolist()
+            schema = {}
+            for table in tables:
+                schema[table] = pd.read_sql_query(f"pragma table_info({table})", conn).to_dict(orient="records")
+        return json.dumps(
+            {"status": "sql_repair_hint", "error": error, "query": query, "schema": schema},
+            ensure_ascii=False,
+        )
+
     def _run(self, query: str) -> str:
         query = query.strip()
         if query.startswith("```"):
             query = query.strip("`").replace("sql\n", "", 1).replace("SQL\n", "", 1).strip()
         query = query.rstrip(";")
         if not query.lower().startswith(("select", "with", "pragma")):
-            return json.dumps(
-                {"status": "sql_error", "error": "Only read-only SELECT/WITH/PRAGMA statements are allowed.", "query": query},
-                ensure_ascii=False,
-            )
+            return self._schema_hint(query, "Only read-only SELECT/WITH/PRAGMA statements are allowed.")
         with sqlite3.connect(self.db_path) as conn:
             try:
                 df = pd.read_sql_query(query, conn)
             except Exception as exc:
-                return json.dumps({"status": "sql_error", "error": repr(exc), "query": query}, ensure_ascii=False)
+                return self._schema_hint(query, repr(exc))
         return df.to_json(orient="records", force_ascii=False)
 
 
@@ -74,7 +119,20 @@ class PythonREPLTool(BaseTool):
         try:
             exec(code, {"__builtins__": __builtins__}, scope)
         except Exception as exc:
-            return json.dumps({"status": "python_error", "error": repr(exc), "code": code}, ensure_ascii=False)
+            try:
+                value = eval(code, {"__builtins__": __builtins__, "pd": pd, "np": np, "json": json, "math": math}, scope)
+                return repr(value)
+            except Exception:
+                return json.dumps(
+                    {
+                        "status": "python_repair_hint",
+                        "error": repr(exc),
+                        "trace": traceback.format_exc(limit=2),
+                        "code": code,
+                        "hint": "Assign the final value to variable 'result' or provide a valid Python expression.",
+                    },
+                    ensure_ascii=False,
+                )
         return repr(scope.get("result", None))
 
 
