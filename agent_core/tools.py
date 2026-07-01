@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
+import numpy as np
 import pandas as pd
 from duckduckgo_search import DDGS
 from langchain_core.tools import BaseTool
@@ -41,8 +43,15 @@ class SQLiteDatabaseTool(BaseTool):
     db_path: str
 
     def _run(self, query: str) -> str:
-        if not query.strip().lower().startswith(("select", "with", "pragma")):
-            raise ValueError("SQLite tool only permits read-only SELECT/WITH/PRAGMA statements.")
+        query = query.strip()
+        if query.startswith("```"):
+            query = query.strip("`").replace("sql\n", "", 1).replace("SQL\n", "", 1).strip()
+        query = query.rstrip(";")
+        if not query.lower().startswith(("select", "with", "pragma")):
+            return json.dumps(
+                {"status": "sql_error", "error": "Only read-only SELECT/WITH/PRAGMA statements are allowed.", "query": query},
+                ensure_ascii=False,
+            )
         with sqlite3.connect(self.db_path) as conn:
             try:
                 df = pd.read_sql_query(query, conn)
@@ -61,7 +70,7 @@ class PythonREPLTool(BaseTool):
     args_schema: type[BaseModel] = PythonInput
 
     def _run(self, code: str) -> str:
-        scope: Dict[str, Any] = {"pd": pd, "json": json}
+        scope: Dict[str, Any] = {"pd": pd, "np": np, "json": json, "math": math}
         try:
             exec(code, {"__builtins__": __builtins__}, scope)
         except Exception as exc:

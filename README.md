@@ -216,6 +216,37 @@ Outputs:
 - `decoder_ablation.csv` and `decoder_ablation_summary.csv` comparing full, action-only, and feature-only decoders
 - `tool_diagnostics.csv` for real tool reliability and task-success analysis
 
+For morning-report style experiments that focus on reducing abstention and improving deployment readiness:
+
+```bash
+python -m agent_watermark.experiments.evaluate_watermark \
+  --config configs/deepseek.yaml \
+  --watermarked-author alice-lab \
+  --authors alice-lab bob-lab carol-lab \
+  --tasks 6 \
+  --repeats 1 \
+  --lambda-values 0.06 0.12 0.18 0.24 0.30 \
+  --timestamp-granularity hour \
+  --auto-calibrate-threshold \
+  --target-selective-accuracy 0.95 \
+  --min-confidence 0.55 \
+  --out runtime/morning_report_v3
+```
+
+The summary now separates `task_success_rate` from `strict_task_success_rate`. The first checks whether
+the agent produced a usable final answer; the second treats any intermediate tool error as a failed trajectory,
+which is useful for diagnosing tool-chain reliability separately from watermark recovery.
+
+Multi-run deployment decoding is available through:
+
+```bash
+python -m agent_watermark.experiments.decode_runs \
+  --logs runtime/logs/*.jsonl \
+  --authors alice-lab bob-lab carol-lab \
+  --timestamps 2026-07-01T12:00:00+00:00 \
+  --timestamp-granularity hour
+```
+
 The evaluation script includes clean decoding plus robustness attacks:
 
 - 10%, 20%, 30% log cropping

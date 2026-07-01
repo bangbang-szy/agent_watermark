@@ -66,6 +66,15 @@ def task_success(log_path: str, answer: str | None) -> bool:
     """Heuristic task-success indicator for batch research runs."""
     if not answer or not str(answer).strip():
         return False
+    if str(answer).lower().startswith("unable to complete"):
+        return False
+    return True
+
+
+def strict_task_success(log_path: str, answer: str | None) -> bool:
+    """Strict task-success indicator that treats any tool error as failed."""
+    if not task_success(log_path, answer):
+        return False
     steps = JsonlExecutionLogger.read(log_path)
     for step in steps:
         if step.tool_call and step.tool_call.error:
@@ -99,6 +108,7 @@ def run_logs(cfg: dict, authors: List[str], tasks: List[str], repeats: int, lamb
                         "answer": result.get("answer"),
                     }
                     row["task_success"] = task_success(log_path, row["answer"])
+                    row["strict_task_success"] = strict_task_success(log_path, row["answer"])
                     rows.append(row)
                     print(json.dumps(rows[-1], ensure_ascii=False))
     return pd.DataFrame(rows)
@@ -122,6 +132,7 @@ def existing_manifest(logs: Iterable[str]) -> pd.DataFrame:
                 "log_path": str(path),
                 "answer": steps[-1].final_answer,
                 "task_success": task_success(str(path), steps[-1].final_answer),
+                "strict_task_success": strict_task_success(str(path), steps[-1].final_answer),
             }
         )
     return pd.DataFrame(rows)
@@ -340,7 +351,7 @@ def votes_table(clean_results: pd.DataFrame) -> pd.DataFrame:
 def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame, min_margin: float) -> pd.DataFrame:
     """Aggregate multiple runs by lambda/repeat/true author for paper-style group decoding."""
     merged = clean_results.merge(
-        manifest[["run_id", "watermark_lambda", "repeat", "task_success"]],
+        manifest[["run_id", "watermark_lambda", "repeat", "task_success", "strict_task_success"]],
         on="run_id",
         how="left",
     )
@@ -371,6 +382,7 @@ def aggregate_runs(clean_results: pd.DataFrame, manifest: pd.DataFrame, min_marg
                 "decoded_timestamp": decoded_timestamp,
                 "num_runs": int(len(part)),
                 "task_success_rate": float(part["task_success"].mean()),
+                "strict_task_success_rate": float(part["strict_task_success"].mean()),
                 "aggregate_margin": margin,
                 "aggregate_margin_per_run": margin_per_run,
                 "abstained": abstained,
@@ -389,7 +401,7 @@ def aggregate_by_prefix(
 ) -> pd.DataFrame:
     """Show how accumulating more trajectories changes coverage and accuracy."""
     merged = clean_results.merge(
-        manifest[["run_id", "watermark_lambda", "repeat", "task_success"]],
+        manifest[["run_id", "watermark_lambda", "repeat", "task_success", "strict_task_success"]],
         on="run_id",
         how="left",
     ).sort_values(["watermark_lambda", "repeat", "run_id"])
@@ -497,10 +509,15 @@ def write_statistical_summary(
     out_dir: Path,
 ) -> None:
     rows = []
-    merged_clean = clean_results.merge(manifest[["run_id", "watermark_lambda", "task_success"]], on="run_id", how="left")
+    merged_clean = clean_results.merge(
+        manifest[["run_id", "watermark_lambda", "task_success", "strict_task_success"]],
+        on="run_id",
+        how="left",
+    )
     for watermark_lambda, part in merged_clean.groupby("watermark_lambda", dropna=False):
         for metric, column in [
             ("task_success", "task_success"),
+            ("strict_task_success", "strict_task_success"),
             ("clean_author_accuracy", "correct_author"),
             ("clean_timestamp_bucket_accuracy", "correct_timestamp_bucket"),
             ("clean_confidence", "confidence"),
@@ -557,6 +574,22 @@ def plot_metrics(
     plot_dir = out_dir / "plots"
     plot_dir.mkdir(parents=True, exist_ok=True)
 
+    aggregate_summary_for_json = {}
+    if not aggregate_prefix_df.empty:
+        grouped = aggregate_prefix_df.groupby("group_size", as_index=False).agg(
+            accuracy=("correct_author", "mean"),
+            accuracy_after_abstain=("correct_author_when_not_abstained", "mean"),
+            coverage=("coverage", "mean"),
+            margin_per_run=("margin_per_run", "mean"),
+        )
+        best = grouped.sort_values(["coverage", "accuracy_after_abstain"], ascending=False).iloc[0]
+        aggregate_summary_for_json = {
+            "best_aggregate_group_size": int(best["group_size"]),
+            "best_aggregate_coverage": float(best["coverage"]),
+            "best_aggregate_accuracy": float(best["accuracy"]),
+            "best_aggregate_accuracy_after_abstain": float(best["accuracy_after_abstain"]),
+            "best_aggregate_margin_per_run": float(best["margin_per_run"]),
+        }
     summary = {
         "clean_author_accuracy": float(clean_results["correct_author"].mean()),
         "clean_timestamp_accuracy": float(clean_results["correct_timestamp"].mean()),
@@ -569,9 +602,11 @@ def plot_metrics(
         "effective_min_margin": float(effective_min_margin),
         "target_selective_accuracy": float(target_selective_accuracy),
         "task_success_rate": float(manifest["task_success"].mean()) if "task_success" in manifest else None,
+        "strict_task_success_rate": float(manifest["strict_task_success"].mean()) if "strict_task_success" in manifest else None,
         "num_runs": int(len(manifest)),
         "num_steps": int(len(step_df)),
     }
+    summary.update(aggregate_summary_for_json)
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     fig, axes = plt.subplots(2, 3, figsize=(16, 9))
