@@ -282,6 +282,31 @@ This post-processing command does not call the LLM again. It reuses JSONL execut
 - `plots/paper_stealth_distribution_shift.png`
 - `plots/paper_detectability.png`
 
+For true real-author scaling, run the same script with fresh live trajectories:
+
+```bash
+python -m agent_watermark.experiments.paper_experiments \
+  --config configs/deepseek.yaml \
+  --run-real-author-scaling \
+  --authors alice-lab bob-lab carol-lab \
+  --real-author-sizes 3 5 10 20 \
+  --tasks 8 \
+  --repeats 1 \
+  --lambda-values 0.12 \
+  --timestamp-granularity hour \
+  --out runtime/aaai_real_author_scaling
+```
+
+This generates real watermarked execution logs for every author up to the largest requested scale.
+With the command above, the live part runs `20 authors x 8 tasks x 1 repeat x 1 lambda = 160`
+real agent trajectories. Use `--tasks 0 --repeats 2 --lambda-values 0.06 0.12 0.18` for the
+full paper-scale setting.
+
+The script separates two different claims:
+
+- `paper_candidate_author_scaling.csv`: candidate-set pressure test with extra decoy authors
+- `paper_real_author_scaling.csv`: true scalability using freshly generated logs from 3/5/10/20 real authors
+
 The summary now separates `task_success_rate` from `strict_task_success_rate`. The first checks whether
 the agent produced a usable final answer; the second treats any intermediate tool error as a failed trajectory,
 which is useful for diagnosing tool-chain reliability separately from watermark recovery.
