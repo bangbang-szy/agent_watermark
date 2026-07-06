@@ -258,6 +258,30 @@ python -m agent_watermark.experiments.evaluate_watermark \
 This full setting runs `3 authors x 16 tasks x 2 repeats x 3 lambdas = 288` real agent trajectories before attacks.
 For a cheaper version, use `--tasks 8 --repeats 1`.
 
+To generate AAAI-style offline paper tables and plots from an existing evaluation directory:
+
+```bash
+python -m agent_watermark.experiments.paper_experiments \
+  --evaluation-dir runtime/full_robustness_report \
+  --authors alice-lab bob-lab carol-lab \
+  --timestamp-granularity hour \
+  --candidate-author-sizes 3 5 10 20 \
+  --out runtime/aaai_paper_experiments
+```
+
+This post-processing command does not call the LLM again. It reuses JSONL execution logs and produces:
+
+- `paper_baselines.csv`: full decoder versus random guess, majority-author, trajectory-length, tool-frequency, and behavior-feature baselines
+- `paper_author_scaling.csv`: recovery accuracy as the candidate author set grows with synthetic decoy authors
+- `paper_timestamp_granularity.csv`: exact/minute/hour/day timestamp-capacity study
+- `paper_stealth_distribution.csv`: KL/JS/probability-shift statistics between raw and watermarked action distributions
+- `paper_detectability.csv`: counterfactual raw-vs-watermarked distribution detector AUC
+- `plots/paper_baseline_comparison.png`
+- `plots/paper_author_scaling.png`
+- `plots/paper_timestamp_granularity.png`
+- `plots/paper_stealth_distribution_shift.png`
+- `plots/paper_detectability.png`
+
 The summary now separates `task_success_rate` from `strict_task_success_rate`. The first checks whether
 the agent produced a usable final answer; the second treats any intermediate tool error as a failed trajectory,
 which is useful for diagnosing tool-chain reliability separately from watermark recovery.
