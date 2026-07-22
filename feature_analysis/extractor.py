@@ -26,14 +26,20 @@ class BehaviorFeatureExtractor:
         candidate_margins = []
         chosen_gains = []
         for step in steps:
-            ranked = sorted(step.candidate_actions, key=lambda c: c.raw_probability, reverse=True)
-            first_rank_hits.append(1.0 if ranked and ranked[0].name == step.chosen_action else 0.0)
-            raw_probs = sorted([c.raw_probability for c in step.candidate_actions], reverse=True)
+            raw_candidates = [c for c in step.candidate_actions if c.raw_probability is not None]
+            if raw_candidates:
+                ranked = sorted(raw_candidates, key=lambda c: float(c.raw_probability), reverse=True)
+                first_rank_hits.append(1.0 if ranked[0].name == step.chosen_action else 0.0)
+            raw_probs = sorted([float(c.raw_probability) for c in raw_candidates], reverse=True)
             if len(raw_probs) >= 2:
                 candidate_margins.append(raw_probs[0] - raw_probs[1])
             for candidate in step.candidate_actions:
-                if candidate.name == step.chosen_action:
-                    chosen_gains.append(candidate.watermarked_probability - candidate.raw_probability)
+                if (
+                    candidate.name == step.chosen_action
+                    and candidate.watermarked_probability is not None
+                    and candidate.raw_probability is not None
+                ):
+                    chosen_gains.append(float(candidate.watermarked_probability) - float(candidate.raw_probability))
         transition_hash = 0.0
         if transitions:
             counts = Counter(transitions)
@@ -66,7 +72,7 @@ class BehaviorFeatureExtractor:
             "average_trajectory_length": float(len(steps)),
             "early_stop_ratio": 1.0 if len(steps) <= 3 and chosen[-1] == "final_answer" else 0.0,
             "tool_transition_pattern": float(transition_hash),
-            "action_rank_preference": float(np.mean(first_rank_hits)),
+            "action_rank_preference": float(np.mean(first_rank_hits)) if first_rank_hits else 0.0,
             "database_query_ratio": chosen.count("sqlite_db") / max(1, len(tool_steps)),
             "unique_tool_ratio": len(set(tool_steps)) / max(1, len(tool_steps)),
             "candidate_margin_mean": float(np.mean(candidate_margins)) if candidate_margins else 0.0,

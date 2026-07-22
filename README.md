@@ -144,6 +144,70 @@ Implemented attacks:
 
 Results are written to `runtime/attacks/robustness_results.json`.
 
+## Deployment-Readiness Evaluation
+
+The full decoder requires a trusted audit log containing both the pre- and
+post-watermark candidate probabilities.  Evaluate this assumption explicitly
+before reporting a black-box attribution result:
+
+```bash
+python -m agent_watermark.experiments.evaluate_access_tiers \
+  --evaluation-dir full_robustness_report \
+  --log-root logs \
+  --authors alice-lab bob-lab carol-lab \
+  --timestamp-granularity hour \
+  --target-selective-accuracy 0.95 \
+  --out runtime/access_tiers
+```
+
+The command evaluates four non-interchangeable audit views:
+
+- `actions_only`: ordered selected tool/action names only.
+- `actions_candidates`: selected actions and their candidate sets.
+- `watermarked_probabilities`: candidate sets and post-watermark probabilities, without pre-watermark probabilities.
+- `full_trusted_logs`: candidate sets plus both pre- and post-watermark probabilities.
+
+It writes `access_tier_summary.csv`, per-trajectory results, and
+`plots/access_tier_results.png`. The calibration split is separate from the
+test split. To measure open-set false attribution, append independently
+generated unknown-author and unwatermarked JSONL logs:
+
+```bash
+python -m agent_watermark.experiments.evaluate_access_tiers \
+  --evaluation-dir full_robustness_report \
+  --log-root logs \
+  --authors alice-lab bob-lab carol-lab \
+  --unknown-logs runtime/open_set/unknown_author/logs/*.jsonl \
+  --unwatermarked-logs runtime/open_set/unwatermarked/logs/*.jsonl \
+  --target-selective-accuracy 0.95 \
+  --max-negative-fpr 0.05 \
+  --out runtime/access_tiers_open_set
+```
+
+Unknown and unwatermarked logs must be new real trajectories, not edited
+watermarked logs. A missing negative set is reported as `NaN`; it is not a
+false-positive result.
+
+Generate those controls with the same real agent, model, and tool stack. The
+first command creates an author outside the candidate registry; the second
+sets the embedding strength to zero and is the unwatermarked negative:
+
+```bash
+python -m agent_watermark.experiments.generate_control_logs \
+  --config configs/deepseek.yaml \
+  --author-id heldout-author-lab \
+  --watermark-lambda 0.18 \
+  --tasks 0 --repeats 3 \
+  --out runtime/open_set/unknown_author
+
+python -m agent_watermark.experiments.generate_control_logs \
+  --config configs/deepseek.yaml \
+  --author-id control-no-watermark \
+  --watermark-lambda 0.0 \
+  --tasks 0 --repeats 3 \
+  --out runtime/open_set/unwatermarked
+```
+
 ## Presentation Evaluation Plots
 
 Run a compact multi-task evaluation and generate PNG figures for slides or a standup:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence
+from typing import Dict, Iterable, List, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,12 @@ class MultiStatisticVotingDecoder:
         min_confidence: float = 0.55,
         action_weight: float = 0.85,
         feature_weight: float = 0.15,
+        access_tier: Literal[
+            "actions_only",
+            "actions_candidates",
+            "watermarked_probabilities",
+            "full_trusted_logs",
+        ] = "full_trusted_logs",
     ):
         self.candidate_authors = list(candidate_authors)
         self.candidate_timestamps = list(candidate_timestamps)
@@ -46,13 +52,37 @@ class MultiStatisticVotingDecoder:
         total_weight = max(action_weight + feature_weight, 1e-12)
         self.action_weight = action_weight / total_weight
         self.feature_weight = feature_weight / total_weight
+        self.access_tier = access_tier
+        if access_tier not in {
+            "actions_only",
+            "actions_candidates",
+            "watermarked_probabilities",
+            "full_trusted_logs",
+        }:
+            raise ValueError(f"Unsupported access tier: {access_tier}")
         self.extractor = BehaviorFeatureExtractor()
         self.signature = SignatureGenerator()
+
+    def _available_feature_names(self) -> List[str]:
+        """Return behavior features observable under the declared log view."""
+        if self.access_tier == "full_trusted_logs":
+            return list(FEATURE_NAMES)
+        # These statistics only need the ordered chosen-action sequence.
+        return [
+            "tool_usage_frequency",
+            "search_tool_ratio",
+            "average_trajectory_length",
+            "early_stop_ratio",
+            "tool_transition_pattern",
+            "database_query_ratio",
+            "unique_tool_ratio",
+            "tool_entropy",
+        ]
 
     def _observed_direction_from_steps(self, steps: Sequence) -> Dict[str, int]:
         features = self.extractor.from_steps(list(steps))
         signs = {}
-        for name in FEATURE_NAMES:
+        for name in self._available_feature_names():
             value = features.get(name, 0.0)
             signs[name] = 1 if value >= 0.5 else -1
         return signs
@@ -64,7 +94,55 @@ class MultiStatisticVotingDecoder:
         sparse for stable behavioral frequencies.
         """
         expected = self.signature.feature_signature(identity, self.timestamp_granularity)
-        return float(np.mean([1.0 if observed[k] == expected[k] else 0.0 for k in FEATURE_NAMES]))
+        if not observed:
+            return 0.5
+        return float(np.mean([1.0 if observed[k] == expected[k] else 0.0 for k in observed]))
+
+    def _chosen_action_alignment(self, steps: Sequence, identity: WatermarkIdentity) -> float:
+        """Weak score available from an ordered chosen-action trace alone."""
+        values = [
+            self.signature.tool_phi(identity, step.chosen_action, self.timestamp_granularity)
+            for step in steps
+            if step.chosen_action
+        ]
+        return float((np.mean(values) + 1.0) / 2.0) if values else 0.5
+
+    def _candidate_choice_alignment(self, steps: Sequence, identity: WatermarkIdentity) -> float:
+        """Score whether selected actions are favorable within each candidate set."""
+        values: List[float] = []
+        for step in steps:
+            if len(step.candidate_actions) < 2:
+                continue
+            phis = np.asarray(
+                [self.signature.tool_phi(identity, c.name, self.timestamp_granularity) for c in step.candidate_actions],
+                dtype=float,
+            )
+            chosen_index = next((i for i, c in enumerate(step.candidate_actions) if c.name == step.chosen_action), None)
+            if chosen_index is None:
+                continue
+            centered = phis - phis.mean()
+            scale = float(np.max(np.abs(centered)))
+            if scale > 1e-12:
+                values.append(float(centered[chosen_index] / scale))
+        return float((np.mean(values) + 1.0) / 2.0) if values else 0.5
+
+    def _watermarked_probability_alignment(self, steps: Sequence, identity: WatermarkIdentity) -> float:
+        """Score an audit view that has post-watermark probabilities but no baseline."""
+        similarities: List[float] = []
+        for step in steps:
+            available = [c for c in step.candidate_actions if c.watermarked_probability is not None]
+            if len(available) < 2:
+                continue
+            observed = np.asarray([float(c.watermarked_probability) for c in available], dtype=float)
+            expected = np.asarray(
+                [self.signature.tool_phi(identity, c.name, self.timestamp_granularity) for c in available], dtype=float
+            )
+            observed = observed - observed.mean()
+            expected = expected - expected.mean()
+            denom = float(np.linalg.norm(observed) * np.linalg.norm(expected))
+            if denom > 1e-12:
+                similarities.append(float(np.dot(observed, expected) / denom))
+        return float((np.mean(similarities) + 1.0) / 2.0) if similarities else 0.5
 
     def _legacy_phi_alignment(self, path: str | Path, identity: WatermarkIdentity) -> float:
         """Compatibility score for logs that include watermark_phi.
@@ -99,8 +177,10 @@ class MultiStatisticVotingDecoder:
             observed = []
             expected = []
             for candidate in step.candidate_actions:
-                raw = max(candidate.raw_probability, 1e-12)
-                watermarked = max(candidate.watermarked_probability, 1e-12)
+                if candidate.raw_probability is None or candidate.watermarked_probability is None:
+                    continue
+                raw = max(float(candidate.raw_probability), 1e-12)
+                watermarked = max(float(candidate.watermarked_probability), 1e-12)
                 observed.append(np.log(watermarked) - np.log(raw))
                 expected.append(self.signature.tool_phi(identity, candidate.name, self.timestamp_granularity))
             obs = np.asarray(observed, dtype=float)
@@ -122,7 +202,14 @@ class MultiStatisticVotingDecoder:
             for ts in self.candidate_timestamps:
                 identity = WatermarkIdentity(author, ts)
                 feature_vote = self._feature_vote(observed, identity)
-                action_vote = self._action_delta_alignment(steps, identity)
+                if self.access_tier == "actions_only":
+                    action_vote = self._chosen_action_alignment(steps, identity)
+                elif self.access_tier == "actions_candidates":
+                    action_vote = self._candidate_choice_alignment(steps, identity)
+                elif self.access_tier == "watermarked_probabilities":
+                    action_vote = self._watermarked_probability_alignment(steps, identity)
+                else:
+                    action_vote = self._action_delta_alignment(steps, identity)
                 score = self.action_weight * action_vote + self.feature_weight * feature_vote
                 rows.append(
                     {

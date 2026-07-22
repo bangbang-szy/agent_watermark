@@ -16,11 +16,13 @@ class CandidateAction(BaseModel):
 
     name: str
     description: str = ""
-    raw_logit: float
-    raw_probability: float
+    # Probability fields are optional because deployment audits may expose a
+    # redacted log view. The online embedder always writes every field.
+    raw_logit: Optional[float] = None
+    raw_probability: Optional[float] = None
     watermark_phi: float = 0.0
-    watermarked_logit: float
-    watermarked_probability: float
+    watermarked_logit: Optional[float] = None
+    watermarked_probability: Optional[float] = None
 
 
 class ToolCallLog(BaseModel):
